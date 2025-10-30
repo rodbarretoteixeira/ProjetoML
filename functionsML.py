@@ -3,56 +3,28 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 from scipy.stats import chi2_contingency
+from collections import Counter
+import math
 
 def fix_typos(col, db):
     """Fix edge typos, prioritizing matching first letters, then falling back."""
    
     db[col] = db[col].apply(lambda x: x.lower().strip().replace(r'\s+', ' ') if pd.notna(x) else x)
-    unique_col = sorted(db[col].dropna().unique())
-    replacements = {}
-
-    for i, u1 in enumerate(unique_col):
-        for u2 in unique_col[i+1:]:
-            if u1 == u2:
+    unique_values = db[col].dropna().unique()
+    corrected = db[col].copy()
+    for full in unique_values:
+        for candidate in unique_values:
+            if len(candidate) + 2 == len(full) and full[1:-1] == candidate:
+                corrected = corrected.replace(candidate, full)
+                continue
+            if len(candidate) + 1 == len(full) and full[1:] == candidate:
+                corrected = corrected.replace(candidate, full)
+                continue
+            if len(candidate) + 1 == len(full) and full[:-1] == candidate:
+                corrected = corrected.replace(candidate, full)
                 continue
 
-            # Extract middle cores
-            u1_core = u1[1:-1] if len(u1) > 2 else u1
-            u2_core = u2[1:-1] if len(u2) > 2 else u2
-
-            # Only consider merges if first letters match
-            if u1[0] == u2[0]:
-
-                # Case 1: middle match → pick the longer one
-                if u1_core == u2_core:
-                    bigger = u1 if len(u1) > len(u2) else u2
-                    smaller = u2 if bigger == u1 else u1
-                    replacements[smaller] = bigger
-                    continue
-
-                # Case 2: last-letter-only typos
-                if u1.startswith(u2) or u2.startswith(u1):
-                    bigger = u1 if len(u1) > len(u2) else u2
-                    smaller = u2 if bigger == u1 else u1
-                    replacements[smaller] = bigger
-                    continue
-
-    # Apply replacements twice for propagation
-    db[col] = db[col].replace(replacements)
-    db[col] = db[col].replace(replacements)
-
-    # --- Fix entries missing the first letter ---
-    def fix_missing_first_letter(column):
-        unique_values = column.dropna().unique()
-        corrected = column.copy()
-        for full in unique_values:
-            for candidate in unique_values:
-                # Only fix shorter candidates that are missing the first letter
-                if len(candidate) + 1 == len(full) and full[1:] == candidate:
-                    corrected = corrected.replace(candidate, full)
-        return corrected
-
-    db[col] = fix_missing_first_letter(db[col])
+    db[col] = corrected
 
     return db
 
@@ -88,6 +60,109 @@ def fill_invalid_by_category(target_col, df, category_col):
             pass
 
     return df
+
+
+def missing_values_table(df):
+    """
+    Prints a table showing the number and percentage of missing values
+    for each column in the DataFrame.
+    """
+    # Calculate count and percentage of NaNs per column
+    missing_count = df.isna().sum()
+    missing_percent = (missing_count / len(df)) * 100
+
+    # Combine into a clean DataFrame
+    missing_df = pd.DataFrame({
+        'Missing Values': missing_count,
+        'Percent Missing (%)': missing_percent.round(2)
+    })
+
+    # Filter out columns with no missing values and sort descending
+    missing_df = missing_df[missing_df['Missing Values'] > 0].sort_values(
+        by='Percent Missing (%)', ascending=False
+    )
+
+    # Print results
+    print(f"Total columns: {df.shape[1]}")
+    print(f"Columns with missing values: {missing_df.shape[0]}\n")
+
+    return missing_df
+
+def negative_values_table(df):
+    """
+    Prints a table showing the number and percentage of negative numeric values
+    for each column in the DataFrame.
+    """
+    # Select only numeric columns
+    numeric_df = df.select_dtypes(include=["number"])
+    
+    # Count negatives per column
+    negative_count = (numeric_df < 0).sum()
+    negative_percent = (negative_count / len(numeric_df)) * 100
+
+    # Combine into a clean DataFrame
+    negative_df = pd.DataFrame({
+        'Negative Values': negative_count,
+        'Percent Negative (%)': negative_percent.round(2)
+    })
+
+    # Filter out columns with no negative values and sort descending
+    negative_df = negative_df[negative_df['Negative Values'] > 0].sort_values(
+        by='Percent Negative (%)', ascending=False
+    )
+
+    # Print summary
+    print(f"Total numeric columns: {numeric_df.shape[1]}")
+    print(f"Columns with negative values: {negative_df.shape[0]}\n")
+
+    return negative_df
+
+
+def irrational_values_table(df, decimal_threshold=3):
+    """
+    Displays how many 'irrational' (overly precise float) numbers exist per column,
+    plus a total count of rows that contain at least one such value.
+    """
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    total_rows = len(df)
+
+    def is_irrational(s):
+        dec_len = s.astype(str).str.extract(r'\.(\d+)')[0].str.len()
+        dec_len = pd.to_numeric(dec_len, errors="coerce").fillna(0).astype(int)
+        return dec_len > decimal_threshold
+
+    irrational_mask = df[num_cols].apply(is_irrational)
+    counts = irrational_mask.sum()
+
+    irrational_df = pd.DataFrame({
+        "Irrational Count": counts,
+        "Percent Irrational (%)": (counts / total_rows * 100).round(2)
+    }).query("`Irrational Count` > 0").sort_values("Percent Irrational (%)", ascending=False)
+
+    total_rows_irrational = irrational_mask.any(axis=1).sum()
+    total_percent = (total_rows_irrational / total_rows * 100).round(2)
+
+    total_row = pd.DataFrame({
+        "Irrational Count": [total_rows_irrational],
+        "Percent Irrational (%)": [total_percent]
+    }, index=["Total (rows with any irrational value)"])
+
+    print(f"Total numeric columns: {len(num_cols)}")
+    print(f"Columns with irrational values: {irrational_df.shape[0]}")
+    print(f"Rows with at least one irrational value: {total_rows_irrational}\n")
+
+    return pd.concat([irrational_df, total_row])
+
+
+
+
+
+def negative_to_nan_columns(columns, df):
+    """Convert negative numeric values to NaN for specified columns."""
+    df.loc[:, columns] = df[columns].where(df[columns] >= 0)
+    return df
+
+
 
 
 def cramers_v(x, y):
@@ -145,8 +220,53 @@ def correlation_ratio(categories, values):
 
     if denominator == 0:
         return 0.0
-
     return np.sqrt(numerator / denominator)
+
+def conditional_entropy(x, y):
+    """Compute the conditional entropy H(X | Y)."""
+    # x, y: array-like, same length
+    y_counter = Counter(y)
+    xy_counter = Counter(zip(x, y))
+    total = len(x)
+    ent = 0.0
+    for (x_val, y_val), joint_count in xy_counter.items():
+        p_xy = joint_count / total
+        p_y = y_counter[y_val] / total
+        ent += p_xy * math.log(p_y / p_xy, 2)
+    return ent
+
+def theils_u(x, y):
+    """
+    Compute Theil’s U (Uncertainty Coefficient) U(X|Y):
+    how much knowing Y reduces uncertainty in X.
+    Returns 0 ≤ U ≤ 1. Asymmetric: U(X|Y) ≠ U(Y|X).
+    """
+    # Drop missing simultaneously
+    df = pd.DataFrame({"x": x, "y": y}).dropna()
+    if df.empty:
+        return np.nan
+
+    x = df["x"]
+    y = df["y"]
+
+    # Entropy of X
+    x_counter = Counter(x)
+    total = len(x)
+    p_x = [cnt / total for cnt in x_counter.values()]
+    # If entropy of X is zero (i.e. X is constant), we define U = 1
+    # since Y gives "complete information" (but there is no uncertainty in X anyway)
+    s_x = 0.0
+    for p in p_x:
+        s_x -= p * math.log(p, 2)
+
+    if s_x == 0:
+        return 1.0
+
+    # Conditional entropy H(X|Y)
+    s_x_given_y = conditional_entropy(x, y)
+
+    # U(X|Y) = (H(X) – H(X|Y)) / H(X)
+    return (s_x - s_x_given_y) / s_x
 
 def plot_histogram(data, xlabel, ylabel, title, color='green'):
     """
