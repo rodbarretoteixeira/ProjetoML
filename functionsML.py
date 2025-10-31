@@ -29,7 +29,7 @@ def fix_typos(col, db):
     return db
 
 
-def fill_invalid_by_category(target_col, df, category_col):
+##def fill_invalid_by_category(target_col, df, category_col):
     """
     Fills NaN values in `target_col` based on `category_col`.
     - Numeric columns: mean per category
@@ -59,6 +59,82 @@ def fill_invalid_by_category(target_col, df, category_col):
         except Exception:
             pass
 
+    return df 
+
+def fill_NaN_with_categorical(df, target_col, helper_cols):
+    """
+    Fill NaN values in target_col using mode within groups defined by helper_cols.
+
+    Parameters:
+        df (pd.DataFrame): The input DataFrame.
+        target_col (str): The name of the target column to fill.
+        helper_cols (list of str): List of 1 or 2 categorical helper columns.
+
+    Returns:
+        pd.DataFrame: DataFrame with NaNs filled in target_col.
+    """
+
+    # Group by helper columns and apply
+    df_filled = df.groupby(helper_cols, group_keys=False).apply(fill_group_cat, target_col)
+    
+    return df_filled
+
+
+def fill_NaN_with_mixed(df, target_col, cat_col, num_col, n_bins=15):
+    """
+    Fill NaN values in target_col using a combination of one categorical column
+    and one numerical column (binned into ranges).
+
+    Parameters:
+        df (pd.DataFrame): Input DataFrame.
+        target_col (str): Column with NaNs to fill.
+        cat_col (str): Categorical helper column.
+        num_col (str): Numerical helper column (to be binned).
+        n_bins (int): Number of bins for numerical column.
+
+    Returns:
+        pd.DataFrame: DataFrame with NaNs filled in target_col.
+    """
+    df = df.copy()
+
+    # Bin numerical column and convert to string
+    numeric_bins = pd.cut(df[num_col], bins=n_bins, duplicates='drop').astype(str)
+
+    # Create combined key of categorical + numeric bin
+    combined_key = df[cat_col].astype(str) + "_" + numeric_bins
+    df['_combined_key'] = combined_key
+
+    # Group by combined key and apply filling
+    df_filled = df.groupby('_combined_key', group_keys=False).apply(fill_group_cat, target_col)
+
+    # Drop the helper column
+    df_filled = df_filled.drop(columns=['_combined_key'])
+
+    return df_filled
+
+def fill_group_cat(group, target_col):
+    mode_value = group[target_col].mode()
+    if not mode_value.empty:
+        group[target_col] = group[target_col].fillna(mode_value[0])
+    return group
+
+
+def fill_NaN_with_numeric(df, target_col, helper_cols):
+    """
+    Fill NaN values in a numerical column using 1 or 2 helper columns to compute group-wise statistic.
+
+    Parameters:
+        df (pd.DataFrame): Input DataFrame.
+        target_col (str): Column with NaNs to fill.
+        helper_cols (list of str): List of 1 or 2 helper columns.
+
+    Returns:
+        pd.DataFrame: DataFrame with NaNs filled in target_col.
+    """
+    df = df.copy()  
+    # Apply group-wise filling
+    df[target_col] = df[target_col].fillna(df.groupby(helper_cols)[target_col].transform('median'))
+    
     return df
 
 
@@ -267,6 +343,38 @@ def theils_u(x, y):
 
     # U(X|Y) = (H(X) – H(X|Y)) / H(X)
     return (s_x - s_x_given_y) / s_x
+
+def fill_years(df, mileage_col='mileage', year_col='year', min_count=10):
+    df = df.copy()
+
+    # Step 1: Count mileage occurrences
+    mileage_counts = df[mileage_col].value_counts()
+
+    # Step 2: Compute median year per mileage (ignoring NaNs)
+    mileage_avg_year = df.groupby(mileage_col)[year_col].median()
+
+    # Step 3: Split mileage into frequent and rare
+    frequent_mileage = mileage_counts[mileage_counts >= min_count].index
+    rare_mileage = mileage_counts[mileage_counts < min_count].index
+
+    # Step 4: Fill frequent mileage NaNs
+    df.loc[df[mileage_col].isin(frequent_mileage) & df[year_col].isna(), year_col] = \
+        df.loc[df[mileage_col].isin(frequent_mileage) & df[year_col].isna(), mileage_col].map(mileage_avg_year)
+
+    # Step 5: Fill rare mileage using **closest frequent mileage only**
+    rare_rows = df[df[mileage_col].isin(rare_mileage) & df[year_col].isna()]
+    
+    # Use only **frequent mileage with non-NaN median** as candidates
+    frequent_known_mileages = mileage_avg_year[frequent_mileage].dropna().index.to_numpy()
+    frequent_known_avgs = mileage_avg_year[frequent_mileage].dropna().to_numpy()
+
+    for idx, row in rare_rows.iterrows():
+        mileage_val = row[mileage_col]
+        # Find closest frequent mileage
+        closest_idx = np.argmin(np.abs(frequent_known_mileages - mileage_val))
+        df.at[idx, year_col] = frequent_known_avgs[closest_idx]
+
+    return df
 
 def plot_histogram(data, xlabel, ylabel, title, color='green'):
     """
