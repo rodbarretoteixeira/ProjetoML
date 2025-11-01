@@ -2,6 +2,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
+import scipy.stats as stats
 from scipy.stats import chi2_contingency
 from collections import Counter
 import math
@@ -28,38 +29,6 @@ def fix_typos(col, db):
 
     return db
 
-
-##def fill_invalid_by_category(target_col, df, category_col):
-    """
-    Fills NaN values in `target_col` based on `category_col`.
-    - Numeric columns: mean per category
-    - Categorical columns: mode per category
-    Handles Int64, float, and object types safely.
-    """
-    mask = df[target_col].isna()
-    orig_dtype = df[target_col].dtype
-
-    if pd.api.types.is_numeric_dtype(df[target_col]):
-        # Ensure numeric columns are float during filling
-        df[target_col] = df[target_col].astype(float)
-        agg_values = df.groupby(category_col)[target_col].mean()
-    else:
-        agg_values = df.groupby(category_col)[target_col].agg(
-            lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan
-        )
-
-    df.loc[mask, target_col] = df.loc[mask, category_col].map(agg_values)
-
-    # If originally Int64, round floats before casting
-    if str(orig_dtype) == "Int64":
-        df[target_col] = df[target_col].round().astype("Int64")
-    else:
-        try:
-            df[target_col] = df[target_col].astype(orig_dtype)
-        except Exception:
-            pass
-
-    return df 
 
 def fill_NaN_with_categorical(df, target_col, helper_cols):
     """
@@ -344,37 +313,7 @@ def theils_u(x, y):
     # U(X|Y) = (H(X) – H(X|Y)) / H(X)
     return (s_x - s_x_given_y) / s_x
 
-def fill_years(df, mileage_col='mileage', year_col='year', min_count=10):
-    df = df.copy()
 
-    # Step 1: Count mileage occurrences
-    mileage_counts = df[mileage_col].value_counts()
-
-    # Step 2: Compute median year per mileage (ignoring NaNs)
-    mileage_avg_year = df.groupby(mileage_col)[year_col].median()
-
-    # Step 3: Split mileage into frequent and rare
-    frequent_mileage = mileage_counts[mileage_counts >= min_count].index
-    rare_mileage = mileage_counts[mileage_counts < min_count].index
-
-    # Step 4: Fill frequent mileage NaNs
-    df.loc[df[mileage_col].isin(frequent_mileage) & df[year_col].isna(), year_col] = \
-        df.loc[df[mileage_col].isin(frequent_mileage) & df[year_col].isna(), mileage_col].map(mileage_avg_year)
-
-    # Step 5: Fill rare mileage using **closest frequent mileage only**
-    rare_rows = df[df[mileage_col].isin(rare_mileage) & df[year_col].isna()]
-    
-    # Use only **frequent mileage with non-NaN median** as candidates
-    frequent_known_mileages = mileage_avg_year[frequent_mileage].dropna().index.to_numpy()
-    frequent_known_avgs = mileage_avg_year[frequent_mileage].dropna().to_numpy()
-
-    for idx, row in rare_rows.iterrows():
-        mileage_val = row[mileage_col]
-        # Find closest frequent mileage
-        closest_idx = np.argmin(np.abs(frequent_known_mileages - mileage_val))
-        df.at[idx, year_col] = frequent_known_avgs[closest_idx]
-
-    return df
 
 def plot_histogram(data, xlabel, ylabel, title, color='green'):
     """
@@ -392,3 +331,53 @@ def plot_histogram(data, xlabel, ylabel, title, color='green'):
     plt.ylabel(ylabel)
     plt.title(title)
     plt.show()
+
+
+def TestCorrelationRatio(categories, values, var, threshold=0.1):
+    """
+    Test the strength of association between a categorical and a numeric variable
+    using the Correlation Ratio (η).
+
+    Parameters
+    ----------
+    categories : array-like
+        Categorical variable (predictor).
+    values : array-like
+        Numeric variable (target).
+    var : str
+        Name of the categorical variable (for display).
+    threshold : float, optional
+        Minimum η value considered "important" (default = 0.1).
+
+    Prints
+    ------
+    A message indicating whether the variable is important for prediction.
+    Returns
+    -------
+    float
+        The computed correlation ratio η.
+    """
+    df = pd.DataFrame({'cat': categories, 'val': pd.to_numeric(values, errors='coerce')}).dropna()
+    if df.empty:
+        print(f"{var}: no valid data available.")
+        return np.nan
+
+    means = df.groupby('cat')['val'].mean()
+    overall_mean = df['val'].mean()
+    n_per_cat = df.groupby('cat').size()
+
+    numerator = (n_per_cat * (means - overall_mean) ** 2).sum()
+    denominator = ((df['val'] - overall_mean) ** 2).sum()
+
+    if denominator == 0:
+        eta = 0.0
+    else:
+        eta = np.sqrt(numerator / denominator)
+
+    # Print a simple, interpretable message
+    if eta >= threshold:
+        print(f"{var} is IMPORTANT for prediction (η = {eta:.3f})")
+    else:
+        print(f"{var} is NOT an important predictor (η = {eta:.3f}, below {threshold})")
+
+    return eta
