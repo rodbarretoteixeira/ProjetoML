@@ -7,6 +7,11 @@ from scipy.stats import chi2_contingency
 from collections import Counter
 import math
 
+from sklearn.model_selection import KFold
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+
+
 def fix_typos(col, db):
     """Fix edge typos, prioritizing matching first letters, then falling back."""
    
@@ -433,3 +438,51 @@ def IQR_outliers(df, variables):
         print(f"{col}: {len(outliers)} outliers")
 
     return None  # não devolve o DataFrame inteiro
+
+
+def kfold_target_encode(train_df, cat_col, target_col, id_col='carID', n_splits=5):
+    """
+    Perform K-Fold Target Encoding for a categorical column using an ID column (e.g., carID).
+    
+    Parameters:
+        train_df (pd.DataFrame): Input DataFrame
+        cat_col (str): Categorical column to encode
+        target_col (str): Target column (e.g., 'price')
+        id_col (str): Unique identifier column (e.g., 'carID')
+        n_splits (int): Number of folds
+    Returns:
+        pd.DataFrame: DataFrame with new encoded column '{cat_col}_encoded'
+    """
+
+    # Ensure ID column is unique
+    if not train_df[id_col].is_unique:
+        raise ValueError(f"{id_col} must contain unique values for KFold target encoding.")
+
+    # Create a copy to avoid changing the original DataFrame
+    df = train_df.copy()
+
+    # Initialize encoded column
+    df[f'{cat_col}_encoded'] = np.nan
+
+    # Create the KFold object (no random_state)
+    kf = KFold(n_splits=n_splits, shuffle=True)
+
+    # Perform out-of-fold target encoding
+    for train_idx, valid_idx in kf.split(df):
+        train_fold = df.iloc[train_idx]
+        valid_fold = df.iloc[valid_idx]
+
+        # Compute mean target per category on training fold only
+        fold_mean = train_fold.groupby(cat_col)[target_col].mean()
+
+        # Map encoded values for the validation fold using carID
+        df.loc[df[id_col].isin(valid_fold[id_col]), f'{cat_col}_encoded'] = \
+            valid_fold[cat_col].map(fold_mean).values
+
+    # Fill unseen categories with overall mean
+    overall_mean = df[target_col].mean()
+    df[f'{cat_col}_encoded'].fillna(overall_mean, inplace=True)
+
+    return df
+
+
