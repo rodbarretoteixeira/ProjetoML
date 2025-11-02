@@ -51,7 +51,7 @@ def fill_NaN_with_categorical(df, target_col, helper_cols):
             df[col] = df[col].fillna(df[col].mode()[0])
     
     # Group by helper columns (all rows included)
-    df_filled = df.groupby(helper_cols, dropna=False, group_keys=False).apply(fill_group_cat, target_col)
+    df_filled = df.groupby(helper_cols, dropna=False, group_keys=False ).apply(fill_group_cat, target_col)
     
     return df_filled
 
@@ -388,3 +388,48 @@ def TestCorrelationRatio(categories, values, var, threshold=0.1):
         print(f"{var} is NOT an important predictor (η = {eta:.3f}, below {threshold})")
 
     return eta
+
+
+def plot_multiple_boxes_with_outliers(data, columns, ncols=2):
+
+    num_columns = len(columns)
+    nrows = (num_columns + ncols - 1) // ncols
+    plt.figure(figsize=(8 * ncols, 4 * nrows))
+
+    for i, column in enumerate(columns):
+        Q1 = data[column].quantile(0.25)
+        Q3 = data[column].quantile(0.75)
+        IQR = Q3 - Q1
+
+        lower_bound = Q1 - (1.5 * IQR)
+        upper_bound = Q3 + (1.5 * IQR)
+
+        outliers = data[(data[column] < lower_bound) | (data[column] > upper_bound)][column]
+
+        plt.subplot(nrows, ncols, i + 1)
+        plt.boxplot(data[column], vert=False, widths=0.7,
+                    patch_artist=True, boxprops=dict(facecolor='#4CAF50', color='black'),
+                    medianprops=dict(color='black'))
+        plt.scatter(outliers, [1] * len(outliers), color='red', marker='o', label='Outliers')
+        plt.title(f"Box Plot of {column} with Outliers")
+        plt.xlabel('Value')
+        plt.yticks([])
+        plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+def IQR_outliers(df, variables):
+    q1 = df[variables].quantile(0.25)
+    q3 = df[variables].quantile(0.75)
+    iqr = q3 - q1
+    lower = q1 - 1.5 * iqr
+    upper = q3 + 1.5 * iqr
+
+    for col in variables:
+        outliers = df[(df[col] < lower[col]) | (df[col] > upper[col])]
+        print(f"{col}: {len(outliers)} outliers")
+
+    return None  # não devolve o DataFrame inteiro
