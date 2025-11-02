@@ -43,8 +43,15 @@ def fill_NaN_with_categorical(df, target_col, helper_cols):
         pd.DataFrame: DataFrame with NaNs filled in target_col.
     """
 
-    # Group by helper columns and apply
-    df_filled = df.groupby(helper_cols, group_keys=False).apply(fill_group_cat, target_col)
+    df = df.copy()
+    
+    # Fill missing helper columns with their mode
+    for col in helper_cols:
+        if df[col].isna().any():
+            df[col] = df[col].fillna(df[col].mode()[0])
+    
+    # Group by helper columns (all rows included)
+    df_filled = df.groupby(helper_cols, dropna=False, group_keys=False).apply(fill_group_cat, target_col)
     
     return df_filled
 
