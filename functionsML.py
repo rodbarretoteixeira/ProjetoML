@@ -440,49 +440,63 @@ def IQR_outliers(df, variables):
     return None  # não devolve o DataFrame inteiro
 
 
-def kfold_target_encode(train_df, cat_col, target_col, id_col='carID', n_splits=5):
+def kfold_target_encode(train_df, cat_cols, target_col, id_col='carID', n_splits=5):
     """
-    Perform K-Fold Target Encoding for a categorical column using an ID column (e.g., carID).
-    
+    Perform K-Fold Target Encoding for one or more categorical columns combined.
+
     Parameters:
         train_df (pd.DataFrame): Input DataFrame
-        cat_col (str): Categorical column to encode
+        cat_cols (str or list): Categorical column(s) to encode (e.g. ['brand', 'model'])
         target_col (str): Target column (e.g., 'price')
         id_col (str): Unique identifier column (e.g., 'carID')
         n_splits (int): Number of folds
+
     Returns:
-        pd.DataFrame: DataFrame with new encoded column '{cat_col}_encoded'
+        pd.DataFrame: DataFrame with a new encoded column based on combined categories
     """
 
     # Ensure ID column is unique
     if not train_df[id_col].is_unique:
         raise ValueError(f"{id_col} must contain unique values for KFold target encoding.")
 
-    # Create a copy to avoid changing the original DataFrame
+    # Create a copy to avoid modifying the original
     df = train_df.copy()
 
-    # Initialize encoded column
-    df[f'{cat_col}_encoded'] = np.nan
+    # Allow single string or list for cat_cols
+    if isinstance(cat_cols, str):
+        cat_cols = [cat_cols]
 
-    # Create the KFold object (no random_state)
-    kf = KFold(n_splits=n_splits, shuffle=True)
+    # Create combined categorical feature in a temporary variable
+    combo_series = df[cat_cols].astype(str).agg('_'.join, axis=1)
+    combo_name = "_".join(cat_cols)
+    encoded_col = f"{combo_name}_encoded"
+
+    # Initialize encoded column
+    df[encoded_col] = np.nan
+
+    # Create the KFold object
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
 
     # Perform out-of-fold target encoding
     for train_idx, valid_idx in kf.split(df):
-        train_fold = df.iloc[train_idx]
-        valid_fold = df.iloc[valid_idx]
+        train_fold = df.iloc[train_idx].copy()
+        valid_fold = df.iloc[valid_idx].copy()
 
-        # Compute mean target per category on training fold only
-        fold_mean = train_fold.groupby(cat_col)[target_col].mean()
+        # Create temporary combined category columns for this fold
+        train_combo = combo_series.iloc[train_idx]
+        valid_combo = combo_series.iloc[valid_idx]
 
-        # Map encoded values for the validation fold using carID
-        df.loc[df[id_col].isin(valid_fold[id_col]), f'{cat_col}_encoded'] = \
-            valid_fold[cat_col].map(fold_mean).values
+        # Compute mean target per combined category on training fold
+        fold_mean = train_fold.groupby(train_combo)[target_col].mean()
+
+        # Map encoded values for the validation fold
+        df.loc[df.index[valid_idx], encoded_col] = valid_combo.map(fold_mean).values
 
     # Fill unseen categories with overall mean
     overall_mean = df[target_col].mean()
-    df[f'{cat_col}_encoded'].fillna(overall_mean, inplace=True)
+    df[encoded_col].fillna(overall_mean, inplace=True)
 
-    return df
+    # Return only original columns + new encoded column
+    return df[[*train_df.columns, encoded_col]]
 
 
