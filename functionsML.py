@@ -35,30 +35,48 @@ def fix_typos(col, db):
     return db
 
 
-def fill_NaN_with_categorical(df, target_col, helper_cols):
+def fill_NaN_with_categorical(df, target_col, helper_cols, binned=None):
     """
-    Fill NaN values in target_col using mode within groups defined by helper_cols.
+    Fill NaN values in target_col using mode within groups defined by helper_cols
+    and optionally binned numeric columns.
 
     Parameters:
-        df (pd.DataFrame): The input DataFrame.
-        target_col (str): The name of the target column to fill.
-        helper_cols (list of str): List of 1 or 2 categorical helper columns.
+        df (pd.DataFrame): Input DataFrame.
+        target_col (str): Target column to fill NaNs.
+        helper_cols (list of str): Categorical helper column names.
+        binned (list of pd.Series, optional): List of binned numeric Series to include as helpers.
 
     Returns:
         pd.DataFrame: DataFrame with NaNs filled in target_col.
     """
-
     df = df.copy()
-    
-    # Fill missing helper columns with their mode
-    for col in helper_cols:
+
+    # Initialize list of all helpers
+    all_helpers = list(helper_cols)  # copy original strings
+
+    # Add binned Series as temporary columns
+    temp_cols = []
+    if binned:
+        for i, s in enumerate(binned):
+            temp_name = f"_temp_binned_{i}"
+            df[temp_name] = s
+            all_helpers.append(temp_name)
+            temp_cols.append(temp_name)
+
+    # Fill missing values in all helper columns with mode
+    for col in all_helpers:
         if df[col].isna().any():
             df[col] = df[col].fillna(df[col].mode()[0])
-    
-    # Group by helper columns (all rows included)
-    df_filled = df.groupby(helper_cols, dropna=False, group_keys=False ).apply(fill_group_cat, target_col)
-    
+
+    # Group by helpers and fill target column
+    df_filled = df.groupby(all_helpers, dropna=False, group_keys=False).apply(fill_group_cat, target_col)
+
+    # Remove temporary binned columns
+    if temp_cols:
+        df_filled = df_filled.drop(columns=temp_cols)
+
     return df_filled
+
 
 
 def fill_NaN_with_mixed(df, target_col, cat_col, num_col, n_bins=15):
@@ -278,6 +296,9 @@ def correlation_ratio(categories, values):
     if denominator == 0:
         return 0.0
     return np.sqrt(numerator / denominator)
+
+
+
 
 def conditional_entropy(x, y):
     """Compute the conditional entropy H(X | Y)."""
