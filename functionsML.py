@@ -111,12 +111,62 @@ def fill_NaN_with_mixed(df, target_col, cat_col, num_col, n_bins=15):
 
     return df_filled
 
+
+# def fill_NaN_with_mixed(df, target_col, cat_cols, num_cols, n_bins=30):
+#     """
+#     Fill NaN values in target_col using a combination of categorical and numerical columns.
+#     Ignores helper columns with missing values for each row.
+
+#     Parameters:
+#         df (pd.DataFrame): Input DataFrame.
+#         target_col (str): Column with NaNs to fill.
+#         cat_cols (list of str): Categorical helper columns.
+#         num_cols (list of str): Numerical helper columns (to be binned).
+#         n_bins (int): Number of bins for numerical columns.
+
+#     Returns:
+#         pd.DataFrame: DataFrame with NaNs filled in target_col.
+#     """
+#     df = df.copy()
+
+#     # Bin numerical columns
+#     binned_num = pd.DataFrame(index=df.index)
+#     for col in num_cols:
+#         binned_num[col] = pd.cut(df[col], bins=n_bins, duplicates='drop').astype(str)
+
+#     # Convert categorical columns to string
+#     cat_df = df[cat_cols].astype(str) if cat_cols else pd.DataFrame(index=df.index)
+
+#     # Combine all helper columns
+#     helper_df = pd.concat([cat_df, binned_num], axis=1)
+
+#     # Function to build key for each row, ignoring missing helper values
+#     def build_key(row):
+#         valid_values = row.dropna().astype(str)
+#         return "_".join(valid_values) if not valid_values.empty else "ALL_NAN"
+
+#     # Create combined key row-wise
+#     df['_combined_key'] = helper_df.apply(build_key, axis=1)
+
+#     # Group by combined key and fill NaNs
+#     df_filled = df.groupby('_combined_key', group_keys=False).apply(lambda g: fill_group_cat(g, target_col))
+
+#     # Drop helper column
+#     df_filled = df_filled.drop(columns=['_combined_key'])
+#     return df_filled
+
 def fill_group_cat(group, target_col):
     mode_value = group[target_col].mode()
     if not mode_value.empty:
         group[target_col] = group[target_col].fillna(mode_value[0])
     return group
 
+
+# def fill_group_cat(group, target_col):
+#     mode_value = group[target_col].mode()
+#     if not mode_value.empty:
+#         group[target_col] = group[target_col].fillna(mode_value[0])
+#     return group
 
 def fill_NaN_with_numeric(df, target_col, helper_cols):
     """
