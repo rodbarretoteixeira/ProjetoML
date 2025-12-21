@@ -9,7 +9,13 @@ import math
 
 from sklearn.model_selection import KFold
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import ExtraTreesRegressor 
+from sklearn.ensemble import HistGradientBoostingRegressor 
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.linear_model import RidgeCV
+from sklearn.ensemble import StackingRegressor
 
 
 def fix_typos(col, db):
@@ -631,3 +637,354 @@ def check_overfitting(model, X_train, y_train, X_val, y_val, model_name="Modelo"
         print("🚨 PERIGO: Overfitting Severo! O modelo decorou o treino e falha na validação.")
         
     return df_metrics
+
+
+def predict_group(df, model, scaler, mapping, g_mean, train_cols):
+    if df.empty: return pd.DataFrame()
+    
+    df_enc = df.copy()
+    # Target Encode
+    df_enc["Brand_model_encoded"] = df_enc.apply(lambda x: mapping.get((x["Brand"], x["model"]), g_mean), axis=1)
+    
+    # One Hot
+    df_enc = pd.get_dummies(df_enc, columns=["Brand", "transmission", "fuelType"], drop_first=True)
+    
+    # Alinhamento
+    X_test = df_enc.reindex(columns=train_cols, fill_value=0)
+    
+    # Scaling
+    X_test_s = scaler.transform(X_test)
+    
+    # Prever e inverter log
+    preds = np.expm1(model.predict(X_test_s))
+    
+    return pd.DataFrame({"carID": df["carID"], "price": preds})
+
+
+# ---  FUNÇÃO DE TREINO (ADAPTADA PARA RANDOM FOREST) ---
+def train_and_evaluate_rf(train_df, val_df, group_name):
+    # A. Target Encoding
+    mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
+    global_mean = train_df["price_log"].mean()
+    
+    # B. Encoding & Prep
+    train_len = len(train_df)
+    combined = pd.concat([train_df, val_df], axis=0)
+    combined["Brand_model_encoded"] = combined.apply(
+        lambda x: mapping.get((x["Brand"], x["model"]), global_mean), axis=1
+    )
+    combined = pd.get_dummies(combined, columns=["Brand", "transmission", "fuelType"], drop_first=True)
+    
+    drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
+    X_train = combined.iloc[:train_len].drop(columns=drop_cols, errors='ignore')
+    y_train = combined.iloc[:train_len]["price_log"]
+    X_val = combined.iloc[train_len:].drop(columns=drop_cols, errors='ignore')
+    y_val = combined.iloc[train_len:]["price_log"]
+    
+    train_cols = X_train.columns
+    scaler = MinMaxScaler()
+    X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=train_cols)
+    X_val_s = pd.DataFrame(scaler.transform(X_val), columns=train_cols)
+    
+    # C. Randomized Search
+    X_comb = pd.concat([X_train_s, X_val_s], axis=0).reset_index(drop=True)
+    y_comb = pd.concat([y_train, y_val], axis=0).reset_index(drop=True)
+    ps = PredefinedSplit([-1]*len(X_train_s) + [0]*len(X_val_s))
+    
+    rf = RandomForestRegressor(random_state=42, n_jobs=-1)
+    param_dist = {
+        'n_estimators': [500,1000],
+        'max_depth': [10,15, 20, 30, None],
+        'min_samples_split': randint(2, 10),
+        'min_samples_leaf': randint(1, 4)
+    }
+    
+    search = RandomizedSearchCV(
+        estimator=rf, param_distributions=param_dist, n_iter=50, 
+        cv=ps, scoring='neg_root_mean_squared_error', n_jobs=-1, random_state=42
+    )
+    
+    print(f"\n>>> Treinando Grupo: {group_name}")
+    search.fit(X_comb, y_comb)
+    best_rf_split = search.best_estimator_
+    
+    # D. MÁGICA DO OVERFIT: Comparar Train vs Val
+    p_train = best_rf_split.predict(X_train_s)
+    p_val = best_rf_split.predict(X_val_s)
+    
+    # Métricas no Log (para R2) e Original (para RMSE em Euros)
+    r2_train = r2_score(y_train, p_train)
+    r2_val = r2_score(y_val, p_val)
+    
+    rmse_train = np.sqrt(mean_squared_error(np.expm1(y_train), np.expm1(p_train)))
+    rmse_val = np.sqrt(mean_squared_error(np.expm1(y_val), np.expm1(p_val)))
+    
+    print(f"[{group_name}] R² Treino: {r2_train:.4f} | R² Validação: {r2_val:.4f}")
+    print(f"[{group_name}] RMSE Treino: {rmse_train:.2f}€ | RMSE Validação: {rmse_val:.2f}€")
+    
+    gap = (rmse_val - rmse_train) / rmse_train * 100
+    print(f"[{group_name}] Gap de Overfit: {gap:.2f}%")
+    
+    return best_rf_split, scaler, mapping, global_mean, train_cols
+
+# ---  FUNÇÃO DE TREINO (ADAPTADA PARA EXTRA TREES) ---
+def train_and_evaluate_et(train_df, val_df, group_name):
+    # A. Target Encoding
+    mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
+    global_mean = train_df["price_log"].mean()
+    
+    # B. Encoding & Prep
+    train_len = len(train_df)
+    combined = pd.concat([train_df, val_df], axis=0)
+    
+    # Target Encode
+    combined["Brand_model_encoded"] = combined.apply(
+        lambda x: mapping.get((x["Brand"], x["model"]), global_mean), axis=1
+    )
+    
+    # One-Hot Encode
+    combined = pd.get_dummies(combined, columns=["Brand", "transmission", "fuelType"], drop_first=True)
+    
+    # Separar X e y
+    drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
+    X_train = combined.iloc[:train_len].drop(columns=drop_cols, errors='ignore')
+    y_train = combined.iloc[:train_len]["price_log"]
+    X_val = combined.iloc[train_len:].drop(columns=drop_cols, errors='ignore')
+    y_val = combined.iloc[train_len:]["price_log"]
+    
+    # Scaling
+    train_cols = X_train.columns
+    scaler = MinMaxScaler()
+    X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=train_cols)
+    X_val_s = pd.DataFrame(scaler.transform(X_val), columns=train_cols)
+    
+    # C. Setup para RandomizedSearch
+    X_comb = pd.concat([X_train_s, X_val_s], axis=0).reset_index(drop=True)
+    y_comb = pd.concat([y_train, y_val], axis=0).reset_index(drop=True)
+    
+    # Predefined Split (-1 = Treino, 0 = Validação)
+    ps = PredefinedSplit([-1]*len(X_train_s) + [0]*len(X_val_s))
+    
+    # --- MUDANÇA PRINCIPAL: EXTRA TREES ---
+    # bootstrap=False é comum em ExtraTrees (usa o dataset todo), mas podes testar True.
+    et_model = ExtraTreesRegressor(random_state=42, n_jobs=-1, bootstrap=False)
+    
+    # Grelha de Hiperparâmetros para Extra Trees
+    param_dist = {
+        'n_estimators': [500],
+        'max_features': [1.0],
+        'max_depth': [30],
+        'min_samples_leaf': [1],
+        'min_samples_split': [10]
+    }
+    
+    search = RandomizedSearchCV(
+        estimator=et_model, 
+        param_distributions=param_dist, 
+        n_iter=50,  # ExtraTrees é rápido, 20 iterações é tranquilo
+        cv=ps, 
+        scoring='neg_root_mean_squared_error', 
+        n_jobs=-1, 
+        random_state=42,
+        verbose=1
+    )
+    
+    print(f"\n>>> Treinando ExtraTrees - Grupo: {group_name}")
+    search.fit(X_comb, y_comb)
+    best_et_split = search.best_estimator_
+    print(f"Melhores Params ({group_name}): {search.best_params_}")
+    
+    # D. Análise de Overfit
+    p_train = best_et_split.predict(X_train_s)
+    p_val = best_et_split.predict(X_val_s)
+    
+    # Métricas
+    r2_train = r2_score(y_train, p_train)
+    r2_val = r2_score(y_val, p_val)
+    
+    # Converter Log -> Reais para RMSE
+    rmse_train = np.sqrt(mean_squared_error(np.expm1(y_train), np.expm1(p_train)))
+    rmse_val = np.sqrt(mean_squared_error(np.expm1(y_val), np.expm1(p_val)))
+    
+    print(f"[{group_name}] R² Treino: {r2_train:.4f} | R² Validação: {r2_val:.4f}")
+    print(f"[{group_name}] RMSE Treino: {rmse_train:.2f}€ | RMSE Validação: {rmse_val:.2f}€")
+    
+    gap = (rmse_val - rmse_train) / rmse_train * 100
+    print(f"[{group_name}] Gap de Overfit: {gap:.2f}%")
+    
+    return best_et_split, scaler, mapping, global_mean, train_cols
+
+
+
+# ---  FUNÇÃO DE TREINO (ADAPTADA PARA HIST GRADIENT BOOSTING) ---
+def train_and_evaluate_hgb(train_df, val_df, group_name):
+    # A. Target Encoding
+    mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
+    global_mean = train_df["price_log"].mean()
+    
+    # B. Encoding & Prep
+    train_len = len(train_df)
+    combined = pd.concat([train_df, val_df], axis=0)
+    
+    # Target Encode
+    combined["Brand_model_encoded"] = combined.apply(
+        lambda x: mapping.get((x["Brand"], x["model"]), global_mean), axis=1
+    )
+    
+    # One-Hot Encode
+    combined = pd.get_dummies(combined, columns=["Brand", "transmission", "fuelType"], drop_first=True)
+    
+    # Separar X e y
+    drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
+    X_train = combined.iloc[:train_len].drop(columns=drop_cols, errors='ignore')
+    y_train = combined.iloc[:train_len]["price_log"]
+    X_val = combined.iloc[train_len:].drop(columns=drop_cols, errors='ignore')
+    y_val = combined.iloc[train_len:]["price_log"]
+    
+    # Scaling (O HistGB não obriga, mas ajuda a manter consistência com o resto do projeto)
+    train_cols = X_train.columns
+    scaler = MinMaxScaler()
+    X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=train_cols)
+    X_val_s = pd.DataFrame(scaler.transform(X_val), columns=train_cols)
+    
+    # C. Setup para RandomizedSearch
+    X_comb = pd.concat([X_train_s, X_val_s], axis=0).reset_index(drop=True)
+    y_comb = pd.concat([y_train, y_val], axis=0).reset_index(drop=True)
+    
+    # Predefined Split (-1 = Treino, 0 = Validação)
+    ps = PredefinedSplit([-1]*len(X_train_s) + [0]*len(X_val_s))
+    
+    # --- MODELO HIST GRADIENT BOOSTING ---
+    hgb_model = HistGradientBoostingRegressor(
+        loss='squared_error',
+        random_state=42,
+        early_stopping=False # Desligamos o interno porque usamos CV fixo
+    )
+    
+    # Grelha de Hiperparâmetros (Os teus melhores parâmetros)
+    param_dist = {
+        'l2_regularization': [0.5], 
+    
+        # 2. Controlar a Complexidade
+        # 118 folhas é muito. Vamos testar valores mais baixos.
+        'max_leaf_nodes': [80], 
+        'max_depth': [10], # Limitar a profundidade também
+    
+        # 3. Features e Learning Rate
+        'learning_rate': [0.05],
+        'max_iter': [3000],
+    
+        # IMPORTANTE: Tentar simular o 'log2' do GB
+        # Baixar isto obriga cada árvore a ser mais independente
+        'max_features': [0.3] 
+
+    }
+    
+    search = RandomizedSearchCV(
+        estimator=hgb_model, 
+        param_distributions=param_dist, 
+        n_iter=50, 
+        cv=ps, 
+        scoring='neg_root_mean_squared_error', 
+        n_jobs=-1, 
+        random_state=42,
+        verbose=1
+    )
+    
+    print(f"\n>>> Treinando HistGB - Grupo: {group_name}")
+    search.fit(X_comb, y_comb)
+    best_hgb_split = search.best_estimator_
+    print(f"Melhores Params ({group_name}): {search.best_params_}")
+    
+    # D. Análise de Overfit
+    p_train = best_hgb_split.predict(X_train_s)
+    p_val = best_hgb_split.predict(X_val_s)
+    
+    # Métricas
+    r2_train = r2_score(y_train, p_train)
+    r2_val = r2_score(y_val, p_val)
+    
+    # Converter Log -> Reais para RMSE
+    rmse_train = np.sqrt(mean_squared_error(np.expm1(y_train), np.expm1(p_train)))
+    rmse_val = np.sqrt(mean_squared_error(np.expm1(y_val), np.expm1(p_val)))
+    
+    print(f"[{group_name}] R² Treino: {r2_train:.4f} | R² Validação: {r2_val:.4f}")
+    print(f"[{group_name}] RMSE Treino: {rmse_train:.2f}€ | RMSE Validação: {rmse_val:.2f}€")
+    
+    gap = (rmse_val - rmse_train) / rmse_train * 100
+    print(f"[{group_name}] Gap de Overfit: {gap:.2f}%")
+    
+    return best_hgb_split, scaler, mapping, global_mean, train_cols
+
+
+
+# Nota: Não precisas da função 'get_base_models' aqui.
+# Vamos passar a lista de modelos diretamente para a função 'train_stacking'.
+
+def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
+    """
+    Função genérica de Stacking.
+    estimators: Lista de tuplos com os modelos [(nome, modelo), ...]
+    """
+    print(f"\n🏗️ --- A INICIAR STACKING (5-Fold CV): {group_name} ---")
+    
+    # A. JUNTAR TREINO E VALIDAÇÃO
+    full_train = pd.concat([train_df, val_df], axis=0).reset_index(drop=True)
+    
+    # B. PREPARAÇÃO DOS DADOS (Encoding + Scaling)
+    mapping = full_train.groupby(["Brand", "model"])["price_log"].mean().to_dict()
+    global_mean = full_train["price_log"].mean()
+    
+    def apply_encoding_and_prep(df):
+        d = df.copy()
+        d["Brand_model_encoded"] = d.apply(lambda x: mapping.get((x["Brand"], x["model"]), global_mean), axis=1)
+        d = pd.get_dummies(d, columns=["Brand", "transmission", "fuelType"], drop_first=True)
+        return d
+
+    df_full_proc = apply_encoding_and_prep(full_train)
+    df_test_proc = apply_encoding_and_prep(test_df)
+    
+    # Alinhar colunas
+    drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
+    train_cols = df_full_proc.drop(columns=drop_cols, errors='ignore').columns
+    
+    X = df_full_proc[train_cols]
+    y = df_full_proc["price_log"]
+    X_test = df_test_proc.reindex(columns=train_cols, fill_value=0)
+    
+    # Scaling
+    scaler = MinMaxScaler()
+    X_s = scaler.fit_transform(X)
+    X_test_s = scaler.transform(X_test)
+    
+    # C. DEFINIR O STACK USANDO OS ESTIMADORES PASSADOS
+    stack_model = StackingRegressor(
+        estimators=estimators,      # <--- AQUI ESTÁ A MUDANÇA (Recebe de fora)
+        final_estimator=RidgeCV(),
+        cv=5,
+        n_jobs=-1,
+        passthrough=False,
+        verbose=1
+    )
+    
+    # D. TREINAR
+    print(f"   ⏳ Treinando Stack (Isto envolve treinar {len(estimators)} modelos x 5 folds)...")
+    stack_model.fit(X_s, y)
+    
+    # Analisar o Meta-Modelo
+    print(f"   ✅ Stacking Concluído!")
+    try:
+        coefs = stack_model.final_estimator_.coef_
+        names = [name for name, _ in estimators]
+        print(f"   ⚖️ Pesos do Meta-Modelo: {list(zip(names, coefs))}")
+    except:
+        pass
+
+    # E. PREVER
+    preds_log = stack_model.predict(X_test_s)
+    preds_final = np.expm1(preds_log)
+    
+    return pd.DataFrame({
+        "carID": test_df["carID"].values,
+        "price": preds_final
+    })
