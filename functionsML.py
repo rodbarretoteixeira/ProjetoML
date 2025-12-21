@@ -571,3 +571,63 @@ def kfold_target_encode(train_df, cat_cols, target_col, id_col='carID', n_splits
     return df[[*train_df.columns, encoded_col]]
 
 
+import pandas as pd
+import numpy as np
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+
+def check_overfitting(model, X_train, y_train, X_val, y_val, model_name="Modelo"):
+    """
+    Analisa Overfitting comparando métricas de Treino vs Validação.
+    Assume que o target (y) está em escala LOG e converte para EUROS para o report.
+    """
+    
+    # 1. Fazer Previsões
+    # O modelo prevê em escala Log
+    pred_train_log = model.predict(X_train)
+    pred_val_log = model.predict(X_val)
+    
+    # 2. Reverter para Escala Real (Euros)
+    # Usamos np.expm1 para inverter o np.log1p
+    y_train_real = np.expm1(y_train)
+    y_val_real = np.expm1(y_val)
+    pred_train_real = np.expm1(pred_train_log)
+    pred_val_real = np.expm1(pred_val_log)
+    
+    # 3. Calcular Métricas
+    # R2 (Geralmente calcula-se na escala Log para ver o fit estatístico)
+    r2_train = r2_score(y_train, pred_train_log)
+    r2_val = r2_score(y_val, pred_val_log)
+    
+    # RMSE (Calcula-se em Euros para ter noção do dinheiro)
+    rmse_train = np.sqrt(mean_squared_error(y_train_real, pred_train_real))
+    rmse_val = np.sqrt(mean_squared_error(y_val_real, pred_val_real))
+    
+    # 4. Calcular o "Gap" (A Diferença)
+    # Se o erro na validação for muito maior que no treino, é mau sinal.
+    rmse_gap_perc = ((rmse_val - rmse_train) / rmse_train) * 100
+    r2_drop = r2_train - r2_val
+    
+    # 5. Apresentar Tabela
+    df_metrics = pd.DataFrame({
+        "Métrica": ["RMSE (Erro em €)", "R² (Score)"],
+        "Treino": [f"{rmse_train:.2f}€", f"{r2_train:.4f}"],
+        "Validação": [f"{rmse_val:.2f}€", f"{r2_val:.4f}"],
+        "Diferença (Gap)": [f"+{rmse_gap_perc:.1f}%", f"-{r2_drop:.4f}"]
+    })
+    
+    print(f"\n🔍 ANÁLISE DE OVERFIT: {model_name.upper()}")
+    print("="*60)
+    print(df_metrics.to_string(index=False))
+    print("-" * 60)
+    
+    # 6. Veredito Automático
+    if r2_val > r2_train:
+        print("✅ EXCELENTE: O modelo generaliza melhor que no treino (Underfitting ligeiro ou sorte).")
+    elif rmse_gap_perc < 10 and r2_drop < 0.03:
+        print("✅ SAUDÁVEL: O modelo está robusto. O erro de validação é próximo do treino.")
+    elif rmse_gap_perc < 20:
+        print("⚠️ ALERTA: Algum Overfitting. O modelo começa a decorar o treino.")
+    else:
+        print("🚨 PERIGO: Overfitting Severo! O modelo decorou o treino e falha na validação.")
+        
+    return df_metrics
