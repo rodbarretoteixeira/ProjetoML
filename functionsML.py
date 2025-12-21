@@ -41,81 +41,152 @@ def fix_typos(col, db):
     return db
 
 
-def fill_NaN_with_categorical(df, target_col, helper_cols, binned=None):
+def fill_group_cat(group, target_col, train_grouped):
     """
-    Fill NaN values in target_col using mode within groups defined by helper_cols
-    and optionally binned numeric columns.
-
-    Parameters:
-        df (pd.DataFrame): Input DataFrame.
-        target_col (str): Target column to fill NaNs.
-        helper_cols (list of str): Categorical helper column names.
-        binned (list of pd.Series, optional): List of binned numeric Series to include as helpers.
-
-    Returns:
-        pd.DataFrame: DataFrame with NaNs filled in target_col.
+    Fill NaNs in the target column for a group using the mode
+    from the corresponding group in train_grouped.
     """
+    try:
+        # Get the corresponding group from train_grouped
+        key = group.name
+        train_group = train_grouped.get_group(key)
+        mode_value = train_group[target_col].mode()
+        if not mode_value.empty:
+            group[target_col] = group[target_col].fillna(mode_value[0])
+    except KeyError:
+        # If no corresponding group in train, fill with overall mode
+        mode_value = train_grouped.obj[target_col].mode()
+        if not mode_value.empty:
+            group[target_col] = group[target_col].fillna(mode_value[0])
+    return group
+
+
+
+def fill_NaN_with_categorical(df, train_db, target_col, helper_cols):
+    """Fills NaNs using training-based modes to avoid leakage."""
     df = df.copy()
+    
+    # 1. Create a specific lookup from TRAIN only
+    # We use .agg(list).map(lambda x: mode) to handle multiple modes safely
+    lookup = train_db.groupby(helper_cols)[target_col].apply(
+        lambda x: x.mode()[0] if not x.mode().empty else None
+    ).to_dict()
 
-    # Initialize list of all helpers
-    all_helpers = list(helper_cols)  # copy original strings
+    # 2. Map the lookup. Since helper_cols is a list, we create a temporary key
+    def get_val(row):
+        key = tuple(row[col] for col in helper_cols)
+        return lookup.get(key, None)
 
-    # Add binned Series as temporary columns
-    temp_cols = []
-    if binned:
-        for i, s in enumerate(binned):
-            temp_name = f"_temp_binned_{i}"
-            df[temp_name] = s
-            all_helpers.append(temp_name)
-            temp_cols.append(temp_name)
+    df[target_col] = df[target_col].fillna(df.apply(get_val, axis=1))
 
-    # Fill missing values in all helper columns with mode
-    for col in all_helpers:
-        if df[col].isna().any():
-            df[col] = df[col].fillna(df[col].mode()[0])
+    # 3. Fallback to global mode from TRAIN
+    global_mode = train_db[target_col].mode()[0]
+    df[target_col] = df[target_col].fillna(global_mode)
+    return df
 
-    # Group by helpers and fill target column
-    df_filled = df.groupby(all_helpers, dropna=False, group_keys=False).apply(fill_group_cat, target_col)
-
-    # Remove temporary binned columns
-    if temp_cols:
-        df_filled = df_filled.drop(columns=temp_cols)
-
-    return df_filled
-
-
-
-def fill_NaN_with_mixed(df, target_col, cat_col, num_col, n_bins=15):
-    """
-    Fill NaN values in target_col using a combination of one categorical column
-    and one numerical column (binned into ranges).
-
-    Parameters:
-        df (pd.DataFrame): Input DataFrame.
-        target_col (str): Column with NaNs to fill.
-        cat_col (str): Categorical helper column.
-        num_col (str): Numerical helper column (to be binned).
-        n_bins (int): Number of bins for numerical column.
-
-    Returns:
-        pd.DataFrame: DataFrame with NaNs filled in target_col.
-    """
+def fill_NaN_with_mixed(df, train_db, target_col, cat_col, num_col, n_bins=30):
+    """Fills NaNs using shared bin edges to ensure consistency."""
     df = df.copy()
+    
+    # FIX: Calculate bin edges ONLY on train_db
+    _, bins = pd.qcut(train_db[num_col], q=n_bins, retbins=True, duplicates='drop')
+    
+    # Apply those EXACT bins to both
+    train_bins = pd.cut(train_db[num_col], bins=bins, labels=False, include_lowest=True)
+    df_bins = pd.cut(df[num_col], bins=bins, labels=False, include_lowest=True)
 
-    # Bin numerical column and convert to string
-    numeric_bins = pd.cut(df[num_col], bins=n_bins, duplicates='drop').astype(str)
+    # Create lookup from binned train
+    lookup = train_db.assign(tmp_bin=train_bins).groupby([cat_col, 'tmp_bin'])[target_col].apply(
+        lambda x: x.mode()[0] if not x.mode().empty else None
+    ).to_dict()
 
-    # Create combined key of categorical + numeric bin
-    combined_key = df[cat_col].astype(str) + "_" + numeric_bins
-    df['_combined_key'] = combined_key
+    # Map to df
+    def get_val_mixed(row, bin_val):
+        return lookup.get((row[cat_col], bin_val), None)
 
-    # Group by combined key and apply filling
-    df_filled = df.groupby('_combined_key', group_keys=False).apply(fill_group_cat, target_col)
+    # Use a helper series to map
+    df_fill = pd.Series([lookup.get((c, b), None) for c, b in zip(df[cat_col], df_bins)], index=df.index)
+    df[target_col] = df[target_col].fillna(df_fill)
 
-    # Drop the helper column
-    df_filled = df_filled.drop(columns=['_combined_key'])
+    # Fallback to global mode from TRAIN
+    df[target_col] = df[target_col].fillna(train_db[target_col].mode()[0])
+    return df
 
-    return df_filled
+# def fill_NaN_with_categorical(df, target_col, helper_cols, binned=None):
+#     """
+#     Fill NaN values in target_col using mode within groups defined by helper_cols
+#     and optionally binned numeric columns.
+
+#     Parameters:
+#         df (pd.DataFrame): Input DataFrame.
+#         target_col (str): Target column to fill NaNs.
+#         helper_cols (list of str): Categorical helper column names.
+#         binned (list of pd.Series, optional): List of binned numeric Series to include as helpers.
+
+#     Returns:
+#         pd.DataFrame: DataFrame with NaNs filled in target_col.
+#     """
+#     df = df.copy()
+
+#     # Initialize list of all helpers
+#     all_helpers = list(helper_cols)  # copy original strings
+
+#     # Add binned Series as temporary columns
+#     temp_cols = []
+#     if binned:
+#         for i, s in enumerate(binned):
+#             temp_name = f"_temp_binned_{i}"
+#             df[temp_name] = s
+#             all_helpers.append(temp_name)
+#             temp_cols.append(temp_name)
+
+#     # Fill missing values in all helper columns with mode
+#     for col in all_helpers:
+#         if df[col].isna().any():
+#             df[col] = df[col].fillna(df[col].mode()[0])
+
+#     # Group by helpers and fill target column
+#     df_filled = df.groupby(all_helpers, dropna=False, group_keys=False).apply(fill_group_cat, target_col)
+
+#     # Remove temporary binned columns
+#     if temp_cols:
+#         df_filled = df_filled.drop(columns=temp_cols)
+
+#     return df_filled
+
+
+
+# def fill_NaN_with_mixed(df, target_col, cat_col, num_col, n_bins=15):
+#     """
+#     Fill NaN values in target_col using a combination of one categorical column
+#     and one numerical column (binned into ranges).
+
+#     Parameters:
+#         df (pd.DataFrame): Input DataFrame.
+#         target_col (str): Column with NaNs to fill.
+#         cat_col (str): Categorical helper column.
+#         num_col (str): Numerical helper column (to be binned).
+#         n_bins (int): Number of bins for numerical column.
+
+#     Returns:
+#         pd.DataFrame: DataFrame with NaNs filled in target_col.
+#     """
+#     df = df.copy()
+
+#     # Bin numerical column and convert to string
+#     numeric_bins = pd.cut(df[num_col], bins=n_bins, duplicates='drop').astype(str)
+
+#     # Create combined key of categorical + numeric bin
+#     combined_key = df[cat_col].astype(str) + "_" + numeric_bins
+#     df['_combined_key'] = combined_key
+
+#     # Group by combined key and apply filling
+#     df_filled = df.groupby('_combined_key', group_keys=False).apply(fill_group_cat, target_col)
+
+#     # Drop the helper column
+#     df_filled = df_filled.drop(columns=['_combined_key'])
+
+#     return df_filled
 
 
 # def fill_NaN_with_mixed(df, target_col, cat_cols, num_cols, n_bins=30):
@@ -161,11 +232,11 @@ def fill_NaN_with_mixed(df, target_col, cat_col, num_col, n_bins=15):
 #     df_filled = df_filled.drop(columns=['_combined_key'])
 #     return df_filled
 
-def fill_group_cat(group, target_col):
-    mode_value = group[target_col].mode()
-    if not mode_value.empty:
-        group[target_col] = group[target_col].fillna(mode_value[0])
-    return group
+# def fill_group_cat(group, target_col):
+#     mode_value = group[target_col].mode()
+#     if not mode_value.empty:
+#         group[target_col] = group[target_col].fillna(mode_value[0])
+#     return group
 
 
 # def fill_group_cat(group, target_col):
