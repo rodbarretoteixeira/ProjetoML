@@ -1108,3 +1108,77 @@ def predict_ensemble(df, model, scaler, mapping, g_mean, train_cols):
     X_test_s = scaler.transform(X_test)
     preds = np.expm1(model.predict(X_test_s))
     return pd.DataFrame({"carID": df["carID"], "price": preds})
+
+def clean_data(df):
+    df = df.copy()
+    
+    # Drop irrelevant
+    df = df.drop(columns=["hasDamage","paintQuality%"], errors='ignore')
+    
+    # Text handling
+    text_cols = df.select_dtypes(include=["object"]).columns
+    df[text_cols] = df[text_cols].apply(lambda x: x.str.lower() if x.dtype=="object" else x)
+    for col in df.select_dtypes(include="object").columns:
+        df = f.fix_typos(col, df)
+
+    # Transmission: 'other' passa a 'unknown'
+    df['transmission'] = df['transmission'].replace('other', 'unknown')
+    
+    # FuelType: 'other' passa a 'electric' (conforme o teu cÃ³digo antigo)
+    df['fuelType'] = df['fuelType'].replace('other', 'electric')
+
+    # Filtering / Cleaning Rules
+    df.loc[df["mileage"] < 0, "mileage"] = np.nan
+    df.loc[~df["tax"].between(0, 600), "tax"] = np.nan
+    df.loc[~df["mpg"].between(0, 150), "mpg"] = np.nan
+    df.loc[~df["engineSize"].between(1, 6.3), "engineSize"] = np.nan
+    df.loc[~df["year"].between(1990, 2020), "year"] = np.nan
+    df.loc[~df["previousOwners"].between(0, 6), "previousOwners"] = np.nan
+    mask = (df['year'] % 1 != 0)
+    df.loc[mask, 'year'] = np.nan
+    mask = (df['mileage'] % 1 != 0)
+    df.loc[mask, 'mileage'] = np.nan
+    mask = (df['tax'] % 1 != 0)
+    df.loc[mask, 'tax'] = np.nan
+    mask = df['mpg'] != df['mpg'].round(1)
+    df.loc[mask, 'mpg'] = np.nan
+    mask = df['engineSize'] != df['engineSize'].round(1)
+    df.loc[mask, 'engineSize'] = np.nan
+
+    # Numeric Transformations
+    df['mileage'] = np.log1p(df['mileage'])
+    df['mpg'] = np.log1p(df['mpg'])
+    df['tax'] = np.log1p(df['tax'])
+    
+    # Types and Rounding
+    df["previousOwners"] = pd.to_numeric(df["previousOwners"], errors='coerce').round().astype("Int64")
+    df["year"] = pd.to_numeric(df["year"], errors='coerce').round().astype("Int64")
+    
+    # Imputation
+    df = f.fill_NaN_with_categorical(df, "Brand", ["model","transmission","fuelType"])
+    df = f.fill_NaN_with_categorical(df, "Brand", ["model","transmission"])
+    df = f.fill_NaN_with_categorical(df, "model", ["Brand","transmission","fuelType"])
+    df = f.fill_NaN_with_categorical(df, "model", ["Brand","transmission"])
+    df = f.fill_NaN_with_categorical(df, "mpg", ["model","fuelType"])
+    
+    df["transmission"] = df["transmission"].transform(lambda x: x.fillna(x.mode()[0] if not x.mode().empty else np.nan))
+    df["fuelType"] = df["fuelType"].transform(lambda x: x.fillna(x.mode()[0] if not x.mode().empty else np.nan))
+
+    df = f.fill_NaN_with_mixed(df, "year", "model", "mileage")
+    df = f.fill_NaN_with_mixed(df, "mileage", "model", "year")
+    df = f.fill_NaN_with_mixed(df, "tax", "model", "year")
+    df = f.fill_NaN_with_mixed(df, "engineSize", "model", "tax")
+
+    df["previousOwners"] = df["previousOwners"].transform(lambda x: x.fillna(x.median())).round().astype("Int64")
+    
+    
+    # Residual Fill
+    numeric_cols = df.select_dtypes(include=["number"]).columns.drop(["carID", "price"], errors='ignore')
+    for col in numeric_cols:
+        df[col] = df[col].astype(float)
+        global_mean = df[col].median()
+        df[col] = df[col].fillna(global_mean)
+        if "Int64" in str(df[col].dtype):
+            df[col] = df[col].round().astype("Int64")
+            
+    return df
