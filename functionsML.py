@@ -17,6 +17,9 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.linear_model import RidgeCV
 from sklearn.ensemble import StackingRegressor
 
+import random
+from sklearn.ensemble import VotingRegressor
+from sklearn.model_selection import RandomizedSearchCV, PredefinedSplit
 
 def fix_typos(col, db):
     """Fix edge typos, prioritizing matching first letters, then falling back."""
@@ -1108,6 +1111,50 @@ def predict_ensemble(df, model, scaler, mapping, g_mean, train_cols):
     X_test_s = scaler.transform(X_test)
     preds = np.expm1(model.predict(X_test_s))
     return pd.DataFrame({"carID": df["carID"], "price": preds})
+
+def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
+    estimators_list = list(models_dict.items())
+    model_names = [name for name, _ in estimators_list]
+    n_models = len(estimators_list)
+    
+    # Gerar combinações de pesos
+    random.seed(42)
+    weights_combinations = []
+    for _ in range(100): # 100 tentativas
+        w = []
+        for _ in range(n_models):
+            if random.random() < 0.2: w.append(0) # 20% chance de dropar modelo
+            else: w.append(random.randint(1, 100))
+        if sum(w) == 0: w[0] = 50
+        weights_combinations.append(w)
+    weights_combinations.append([1] * n_models) # Média simples
+    
+    # Configurar Voting
+    voting_base = VotingRegressor(estimators=estimators_list, n_jobs=-1)
+    
+    param_grid = {'weights': weights_combinations}
+    
+    search = RandomizedSearchCV(
+        estimator=voting_base,
+        param_distributions=param_grid,
+        n_iter=50,
+        cv=ps,
+        scoring='neg_root_mean_squared_error',
+        verbose=1,
+        n_jobs=-1,
+        random_state=42
+    )
+    
+    print(f"\n🧠 Otimizando Pesos para {group_name}...")
+    search.fit(X, y)
+    
+    # Relatório
+    best_weights = search.best_params_['weights']
+    print(f"🏆 Melhor RMSE ({group_name}): {-search.best_score_:.5f}")
+    print(f"⚖️ Pesos Ideais: {list(zip(model_names, best_weights))}")
+    
+    return search.best_estimator_
+
 
 def clean_data(df):
     df = df.copy()
