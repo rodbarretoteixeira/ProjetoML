@@ -653,62 +653,62 @@ def kfold_target_encode(train_df, cat_cols, target_col, id_col='carID', n_splits
 
 import pandas as pd
 import numpy as np
+import random
+from scipy.stats import randint
+from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, HistGradientBoostingRegressor, StackingRegressor, VotingRegressor
+from sklearn.model_selection import RandomizedSearchCV, PredefinedSplit, RidgeCV
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
-def check_overfitting(model, X_train, y_train, X_val, y_val, model_name="Modelo"):
+def check_overfitting(model, X_train, y_train, X_val, y_val, model_name="Model"):
     """
-    Analisa Overfitting comparando métricas de Treino vs Validação.
-    Assume que o target (y) está em escala LOG e converte para EUROS para o report.
+    Analyzes Overfitting by comparing Train vs Validation metrics.
+    Assumes target (y) is in LOG scale and converts to EUROS for reporting.
     """
     
-    # 1. Fazer Previsões
-    # O modelo prevê em escala Log
+    # 1. Predictions
     pred_train_log = model.predict(X_train)
     pred_val_log = model.predict(X_val)
     
-    # 2. Reverter para Escala Real (Euros)
-    # Usamos np.expm1 para inverter o np.log1p
+    # 2. Revert to Real Scale (Euros)
     y_train_real = np.expm1(y_train)
     y_val_real = np.expm1(y_val)
     pred_train_real = np.expm1(pred_train_log)
     pred_val_real = np.expm1(pred_val_log)
     
-    # 3. Calcular Métricas
-    # R2 (Geralmente calcula-se na escala Log para ver o fit estatístico)
+    # 3. Calculate Metrics
     r2_train = r2_score(y_train, pred_train_log)
     r2_val = r2_score(y_val, pred_val_log)
     
-    # RMSE (Calcula-se em Euros para ter noção do dinheiro)
     rmse_train = np.sqrt(mean_squared_error(y_train_real, pred_train_real))
     rmse_val = np.sqrt(mean_squared_error(y_val_real, pred_val_real))
     
-    # 4. Calcular o "Gap" (A Diferença)
-    # Se o erro na validação for muito maior que no treino, é mau sinal.
+    # 4. Calculate the Gap
     rmse_gap_perc = ((rmse_val - rmse_train) / rmse_train) * 100
     r2_drop = r2_train - r2_val
     
-    # 5. Apresentar Tabela
+    # 5. Display Table
     df_metrics = pd.DataFrame({
-        "Métrica": ["RMSE (Erro em €)", "R² (Score)"],
-        "Treino": [f"{rmse_train:.2f}€", f"{r2_train:.4f}"],
-        "Validação": [f"{rmse_val:.2f}€", f"{r2_val:.4f}"],
-        "Diferença (Gap)": [f"+{rmse_gap_perc:.1f}%", f"-{r2_drop:.4f}"]
+        "Metric": ["RMSE (Error in Euro)", "R2 (Score)"],
+        "Train": [f"{rmse_train:.2f}Euro", f"{r2_train:.4f}"],
+        "Validation": [f"{rmse_val:.2f}Euro", f"{r2_val:.4f}"],
+        "Difference (Gap)": [f"+{rmse_gap_perc:.1f}%", f"-{r2_drop:.4f}"]
     })
     
-    print(f"\n🔍 ANÁLISE DE OVERFIT: {model_name.upper()}")
+    print(f"\nOVERFIT ANALYSIS: {model_name.upper()}")
     print("="*60)
     print(df_metrics.to_string(index=False))
     print("-" * 60)
     
-    # 6. Veredito Automático
+    # 6. Automatic Verdict
     if r2_val > r2_train:
-        print("✅ EXCELENTE: O modelo generaliza melhor que no treino (Underfitting ligeiro ou sorte).")
+        print("EXCELLENT: The model generalizes better than in training (slight underfitting or luck).")
     elif rmse_gap_perc < 10 and r2_drop < 0.03:
-        print("✅ SAUDÁVEL: O modelo está robusto. O erro de validação é próximo do treino.")
+        print("HEALTHY: The model is robust. Validation error is close to training.")
     elif rmse_gap_perc < 20:
-        print("⚠️ ALERTA: Algum Overfitting. O modelo começa a decorar o treino.")
+        print("WARNING: Some Overfitting. The model is starting to memorize training data.")
     else:
-        print("🚨 PERIGO: Overfitting Severo! O modelo decorou o treino e falha na validação.")
+        print("DANGER: Severe Overfitting! The model memorized training and fails in validation.")
         
     return df_metrics
 
@@ -723,19 +723,18 @@ def predict_group(df, model, scaler, mapping, g_mean, train_cols):
     # One Hot
     df_enc = pd.get_dummies(df_enc, columns=["Brand", "transmission", "fuelType"], drop_first=True)
     
-    # Alinhamento
+    # Alignment
     X_test = df_enc.reindex(columns=train_cols, fill_value=0)
     
     # Scaling
     X_test_s = scaler.transform(X_test)
     
-    # Prever e inverter log
+    # Predict and invert log
     preds = np.expm1(model.predict(X_test_s))
     
     return pd.DataFrame({"carID": df["carID"], "price": preds})
 
 
-# ---  FUNÇÃO DE TREINO (ADAPTADA PARA RANDOM FOREST) ---
 def train_and_evaluate_rf(train_df, val_df, group_name):
     # A. Target Encoding
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
@@ -767,8 +766,8 @@ def train_and_evaluate_rf(train_df, val_df, group_name):
     
     rf = RandomForestRegressor(random_state=42, n_jobs=-1)
     param_dist = {
-        'n_estimators': [500,1000],
-        'max_depth': [10,15, 20, 30, None],
+        'n_estimators': [500, 1000],
+        'max_depth': [10, 15, 20, 30, None],
         'min_samples_split': randint(2, 10),
         'min_samples_leaf': randint(1, 4)
     }
@@ -778,72 +777,60 @@ def train_and_evaluate_rf(train_df, val_df, group_name):
         cv=ps, scoring='neg_root_mean_squared_error', n_jobs=-1, random_state=42
     )
     
-    print(f"\n>>> Treinando Grupo: {group_name}")
+    print(f"\nTraining Group: {group_name}")
     search.fit(X_comb, y_comb)
     best_rf_split = search.best_estimator_
     
-    # D. MÁGICA DO OVERFIT: Comparar Train vs Val
+    # D. Overfit Analysis
     p_train = best_rf_split.predict(X_train_s)
     p_val = best_rf_split.predict(X_val_s)
     
-    # Métricas no Log (para R2) e Original (para RMSE em Euros)
     r2_train = r2_score(y_train, p_train)
     r2_val = r2_score(y_val, p_val)
     
     rmse_train = np.sqrt(mean_squared_error(np.expm1(y_train), np.expm1(p_train)))
     rmse_val = np.sqrt(mean_squared_error(np.expm1(y_val), np.expm1(p_val)))
     
-    print(f"[{group_name}] R² Treino: {r2_train:.4f} | R² Validação: {r2_val:.4f}")
-    print(f"[{group_name}] RMSE Treino: {rmse_train:.2f}€ | RMSE Validação: {rmse_val:.2f}€")
+    print(f"[{group_name}] R2 Train: {r2_train:.4f} | R2 Validation: {r2_val:.4f}")
+    print(f"[{group_name}] RMSE Train: {rmse_train:.2f}Euro | RMSE Validation: {rmse_val:.2f}Euro")
     
     gap = (rmse_val - rmse_train) / rmse_train * 100
-    print(f"[{group_name}] Gap de Overfit: {gap:.2f}%")
+    print(f"[{group_name}] Overfit Gap: {gap:.2f}%")
     
     return best_rf_split, scaler, mapping, global_mean, train_cols
 
-# ---  FUNÇÃO DE TREINO (ADAPTADA PARA EXTRA TREES) ---
+
 def train_and_evaluate_et(train_df, val_df, group_name):
-    # A. Target Encoding
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = train_df["price_log"].mean()
     
-    # B. Encoding & Prep
     train_len = len(train_df)
     combined = pd.concat([train_df, val_df], axis=0)
     
-    # Target Encode
     combined["Brand_model_encoded"] = combined.apply(
         lambda x: mapping.get((x["Brand"], x["model"]), global_mean), axis=1
     )
     
-    # One-Hot Encode
     combined = pd.get_dummies(combined, columns=["Brand", "transmission", "fuelType"], drop_first=True)
     
-    # Separar X e y
     drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
     X_train = combined.iloc[:train_len].drop(columns=drop_cols, errors='ignore')
     y_train = combined.iloc[:train_len]["price_log"]
     X_val = combined.iloc[train_len:].drop(columns=drop_cols, errors='ignore')
     y_val = combined.iloc[train_len:]["price_log"]
     
-    # Scaling
     train_cols = X_train.columns
     scaler = MinMaxScaler()
     X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=train_cols)
     X_val_s = pd.DataFrame(scaler.transform(X_val), columns=train_cols)
     
-    # C. Setup para RandomizedSearch
     X_comb = pd.concat([X_train_s, X_val_s], axis=0).reset_index(drop=True)
     y_comb = pd.concat([y_train, y_val], axis=0).reset_index(drop=True)
     
-    # Predefined Split (-1 = Treino, 0 = Validação)
     ps = PredefinedSplit([-1]*len(X_train_s) + [0]*len(X_val_s))
     
-    # --- MUDANÇA PRINCIPAL: EXTRA TREES ---
-    # bootstrap=False é comum em ExtraTrees (usa o dataset todo), mas podes testar True.
     et_model = ExtraTreesRegressor(random_state=42, n_jobs=-1, bootstrap=False)
     
-    # Grelha de Hiperparâmetros para Extra Trees
     param_dist = {
         'n_estimators': [500],
         'max_features': [1.0],
@@ -855,7 +842,7 @@ def train_and_evaluate_et(train_df, val_df, group_name):
     search = RandomizedSearchCV(
         estimator=et_model, 
         param_distributions=param_dist, 
-        n_iter=50,  # ExtraTrees é rápido, 20 iterações é tranquilo
+        n_iter=50, 
         cv=ps, 
         scoring='neg_root_mean_squared_error', 
         n_jobs=-1, 
@@ -863,95 +850,71 @@ def train_and_evaluate_et(train_df, val_df, group_name):
         verbose=1
     )
     
-    print(f"\n>>> Treinando ExtraTrees - Grupo: {group_name}")
+    print(f"\nTraining ExtraTrees - Group: {group_name}")
     search.fit(X_comb, y_comb)
     best_et_split = search.best_estimator_
-    print(f"Melhores Params ({group_name}): {search.best_params_}")
+    print(f"Best Params ({group_name}): {search.best_params_}")
     
-    # D. Análise de Overfit
     p_train = best_et_split.predict(X_train_s)
     p_val = best_et_split.predict(X_val_s)
     
-    # Métricas
     r2_train = r2_score(y_train, p_train)
     r2_val = r2_score(y_val, p_val)
     
-    # Converter Log -> Reais para RMSE
     rmse_train = np.sqrt(mean_squared_error(np.expm1(y_train), np.expm1(p_train)))
     rmse_val = np.sqrt(mean_squared_error(np.expm1(y_val), np.expm1(p_val)))
     
-    print(f"[{group_name}] R² Treino: {r2_train:.4f} | R² Validação: {r2_val:.4f}")
-    print(f"[{group_name}] RMSE Treino: {rmse_train:.2f}€ | RMSE Validação: {rmse_val:.2f}€")
+    print(f"[{group_name}] R2 Train: {r2_train:.4f} | R2 Validation: {r2_val:.4f}")
+    print(f"[{group_name}] RMSE Train: {rmse_train:.2f}Euro | RMSE Validation: {rmse_val:.2f}Euro")
     
     gap = (rmse_val - rmse_train) / rmse_train * 100
-    print(f"[{group_name}] Gap de Overfit: {gap:.2f}%")
+    print(f"[{group_name}] Overfit Gap: {gap:.2f}%")
     
     return best_et_split, scaler, mapping, global_mean, train_cols
 
 
-
-# ---  FUNÇÃO DE TREINO (ADAPTADA PARA HIST GRADIENT BOOSTING) ---
 def train_and_evaluate_hgb(train_df, val_df, group_name):
-    # A. Target Encoding
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = train_df["price_log"].mean()
     
-    # B. Encoding & Prep
     train_len = len(train_df)
     combined = pd.concat([train_df, val_df], axis=0)
     
-    # Target Encode
     combined["Brand_model_encoded"] = combined.apply(
         lambda x: mapping.get((x["Brand"], x["model"]), global_mean), axis=1
     )
     
-    # One-Hot Encode
     combined = pd.get_dummies(combined, columns=["Brand", "transmission", "fuelType"], drop_first=True)
     
-    # Separar X e y
     drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
     X_train = combined.iloc[:train_len].drop(columns=drop_cols, errors='ignore')
     y_train = combined.iloc[:train_len]["price_log"]
     X_val = combined.iloc[train_len:].drop(columns=drop_cols, errors='ignore')
     y_val = combined.iloc[train_len:]["price_log"]
     
-    # Scaling (O HistGB não obriga, mas ajuda a manter consistência com o resto do projeto)
     train_cols = X_train.columns
     scaler = MinMaxScaler()
     X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=train_cols)
     X_val_s = pd.DataFrame(scaler.transform(X_val), columns=train_cols)
     
-    # C. Setup para RandomizedSearch
     X_comb = pd.concat([X_train_s, X_val_s], axis=0).reset_index(drop=True)
     y_comb = pd.concat([y_train, y_val], axis=0).reset_index(drop=True)
     
-    # Predefined Split (-1 = Treino, 0 = Validação)
     ps = PredefinedSplit([-1]*len(X_train_s) + [0]*len(X_val_s))
     
-    # --- MODELO HIST GRADIENT BOOSTING ---
     hgb_model = HistGradientBoostingRegressor(
         loss='squared_error',
         random_state=42,
-        early_stopping=False # Desligamos o interno porque usamos CV fixo
+        early_stopping=False 
     )
     
-    # Grelha de Hiperparâmetros (Os teus melhores parâmetros)
     param_dist = {
         'l2_regularization': [0.5], 
-    
-        # 2. Controlar a Complexidade
-        # 118 folhas é muito. Vamos testar valores mais baixos.
         'max_leaf_nodes': [80], 
-        'max_depth': [10], # Limitar a profundidade também
-    
-        # 3. Features e Learning Rate
+        'max_depth': [10], 
         'learning_rate': [0.05],
         'max_iter': [3000],
-    
-        # IMPORTANTE: Tentar simular o 'log2' do GB
-        # Baixar isto obriga cada árvore a ser mais independente
         'max_features': [0.3] 
-
     }
     
     search = RandomizedSearchCV(
@@ -965,47 +928,38 @@ def train_and_evaluate_hgb(train_df, val_df, group_name):
         verbose=1
     )
     
-    print(f"\n>>> Treinando HistGB - Grupo: {group_name}")
+    print(f"\nTraining HistGB - Group: {group_name}")
     search.fit(X_comb, y_comb)
     best_hgb_split = search.best_estimator_
-    print(f"Melhores Params ({group_name}): {search.best_params_}")
+    print(f"Best Params ({group_name}): {search.best_params_}")
     
-    # D. Análise de Overfit
     p_train = best_hgb_split.predict(X_train_s)
     p_val = best_hgb_split.predict(X_val_s)
     
-    # Métricas
     r2_train = r2_score(y_train, p_train)
     r2_val = r2_score(y_val, p_val)
     
-    # Converter Log -> Reais para RMSE
     rmse_train = np.sqrt(mean_squared_error(np.expm1(y_train), np.expm1(p_train)))
     rmse_val = np.sqrt(mean_squared_error(np.expm1(y_val), np.expm1(p_val)))
     
-    print(f"[{group_name}] R² Treino: {r2_train:.4f} | R² Validação: {r2_val:.4f}")
-    print(f"[{group_name}] RMSE Treino: {rmse_train:.2f}€ | RMSE Validação: {rmse_val:.2f}€")
+    print(f"[{group_name}] R2 Train: {r2_train:.4f} | R2 Validation: {r2_val:.4f}")
+    print(f"[{group_name}] RMSE Train: {rmse_train:.2f}Euro | RMSE Validation: {rmse_val:.2f}Euro")
     
     gap = (rmse_val - rmse_train) / rmse_train * 100
-    print(f"[{group_name}] Gap de Overfit: {gap:.2f}%")
+    print(f"[{group_name}] Overfit Gap: {gap:.2f}%")
     
     return best_hgb_split, scaler, mapping, global_mean, train_cols
 
 
-
-# Nota: Não precisas da função 'get_base_models' aqui.
-# Vamos passar a lista de modelos diretamente para a função 'train_stacking'.
-
 def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
     """
-    Função genérica de Stacking.
-    estimators: Lista de tuplos com os modelos [(nome, modelo), ...]
+    Generic Stacking function.
+    estimators: List of tuples with models [(name, model), ...]
     """
-    print(f"\n🏗️ --- A INICIAR STACKING (5-Fold CV): {group_name} ---")
+    print(f"\nSTARTING STACKING (5-Fold CV): {group_name}")
     
-    # A. JUNTAR TREINO E VALIDAÇÃO
     full_train = pd.concat([train_df, val_df], axis=0).reset_index(drop=True)
     
-    # B. PREPARAÇÃO DOS DADOS (Encoding + Scaling)
     mapping = full_train.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = full_train["price_log"].mean()
     
@@ -1018,7 +972,6 @@ def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
     df_full_proc = apply_encoding_and_prep(full_train)
     df_test_proc = apply_encoding_and_prep(test_df)
     
-    # Alinhar colunas
     drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
     train_cols = df_full_proc.drop(columns=drop_cols, errors='ignore').columns
     
@@ -1026,14 +979,12 @@ def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
     y = df_full_proc["price_log"]
     X_test = df_test_proc.reindex(columns=train_cols, fill_value=0)
     
-    # Scaling
     scaler = MinMaxScaler()
     X_s = scaler.fit_transform(X)
     X_test_s = scaler.transform(X_test)
     
-    # C. DEFINIR O STACK USANDO OS ESTIMADORES PASSADOS
     stack_model = StackingRegressor(
-        estimators=estimators,      # <--- AQUI ESTÁ A MUDANÇA (Recebe de fora)
+        estimators=estimators, 
         final_estimator=RidgeCV(),
         cv=5,
         n_jobs=-1,
@@ -1041,20 +992,17 @@ def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
         verbose=1
     )
     
-    # D. TREINAR
-    print(f"   ⏳ Treinando Stack (Isto envolve treinar {len(estimators)} modelos x 5 folds)...")
+    print(f"   Training Stack (Involves training {len(estimators)} models x 5 folds)...")
     stack_model.fit(X_s, y)
     
-    # Analisar o Meta-Modelo
-    print(f"   ✅ Stacking Concluído!")
+    print(f"   Stacking Completed!")
     try:
         coefs = stack_model.final_estimator_.coef_
         names = [name for name, _ in estimators]
-        print(f"   ⚖️ Pesos do Meta-Modelo: {list(zip(names, coefs))}")
+        print(f"   Meta-Model Weights: {list(zip(names, coefs))}")
     except:
         pass
 
-    # E. PREVER
     preds_log = stack_model.predict(X_test_s)
     preds_final = np.expm1(preds_log)
     
@@ -1065,7 +1013,6 @@ def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
 
 
 def prepare_data_for_ensemble(train_df, val_df):
-    # Target Encoding (Usar lógica rápida)
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = train_df["price_log"].mean()
     
@@ -1081,21 +1028,17 @@ def prepare_data_for_ensemble(train_df, val_df):
     X = combined.drop(columns=drop_cols, errors='ignore')
     y = combined["price_log"]
     
-    # Scaling (Obrigatório para consistência)
     scaler = MinMaxScaler()
     X_scaled = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
     
-    # Separar para criar o PredefinedSplit corretamente
     X_train_s = X_scaled.iloc[:train_len]
     X_val_s = X_scaled.iloc[train_len:]
     y_train = y.iloc[:train_len]
     y_val = y.iloc[train_len:]
     
-    # Juntar tudo para o RandomizedSearch
     X_final = pd.concat([X_train_s, X_val_s], axis=0).reset_index(drop=True)
     y_final = pd.concat([y_train, y_val], axis=0).reset_index(drop=True)
     
-    # Criar PS
     split_index = ([-1] * len(X_train_s)) + ([0] * len(X_val_s))
     ps = PredefinedSplit(test_fold=split_index)
     
@@ -1112,26 +1055,24 @@ def predict_ensemble(df, model, scaler, mapping, g_mean, train_cols):
     preds = np.expm1(model.predict(X_test_s))
     return pd.DataFrame({"carID": df["carID"], "price": preds})
 
+
 def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
     estimators_list = list(models_dict.items())
     model_names = [name for name, _ in estimators_list]
     n_models = len(estimators_list)
     
-    # Gerar combinações de pesos
     random.seed(42)
     weights_combinations = []
-    for _ in range(100): # 100 tentativas
+    for _ in range(100): 
         w = []
         for _ in range(n_models):
-            if random.random() < 0.2: w.append(0) # 20% chance de dropar modelo
+            if random.random() < 0.2: w.append(0) 
             else: w.append(random.randint(1, 100))
         if sum(w) == 0: w[0] = 50
         weights_combinations.append(w)
-    weights_combinations.append([1] * n_models) # Média simples
+    weights_combinations.append([1] * n_models) 
     
-    # Configurar Voting
     voting_base = VotingRegressor(estimators=estimators_list, n_jobs=-1)
-    
     param_grid = {'weights': weights_combinations}
     
     search = RandomizedSearchCV(
@@ -1145,13 +1086,12 @@ def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
         random_state=42
     )
     
-    print(f"\n🧠 Otimizando Pesos para {group_name}...")
+    print(f"\n Optimizing Weights for {group_name}...")
     search.fit(X, y)
     
-    # Relatório
     best_weights = search.best_params_['weights']
-    print(f"🏆 Melhor RMSE ({group_name}): {-search.best_score_:.5f}")
-    print(f"⚖️ Pesos Ideais: {list(zip(model_names, best_weights))}")
+    print(f" Best RMSE ({group_name}): {-search.best_score_:.5f}")
+    print(f" Ideal Weights: {list(zip(model_names, best_weights))}")
     
     return search.best_estimator_
 
@@ -1159,28 +1099,23 @@ def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
 def clean_data(df):
     df = df.copy()
     
-    # Drop irrelevant
-    df = df.drop(columns=["hasDamage","paintQuality%"], errors='ignore')
+    df = df.drop(columns=["hasDamage", "paintQuality%"], errors='ignore')
     
-    # Text handling
     text_cols = df.select_dtypes(include=["object"]).columns
     df[text_cols] = df[text_cols].apply(lambda x: x.str.lower() if x.dtype=="object" else x)
     for col in df.select_dtypes(include="object").columns:
         df = f.fix_typos(col, df)
 
-    # Transmission: 'other' passa a 'unknown'
     df['transmission'] = df['transmission'].replace('other', 'unknown')
-    
-    # FuelType: 'other' passa a 'electric' (conforme o teu cÃ³digo antigo)
     df['fuelType'] = df['fuelType'].replace('other', 'electric')
 
-    # Filtering / Cleaning Rules
     df.loc[df["mileage"] < 0, "mileage"] = np.nan
     df.loc[~df["tax"].between(0, 600), "tax"] = np.nan
     df.loc[~df["mpg"].between(0, 150), "mpg"] = np.nan
     df.loc[~df["engineSize"].between(1, 6.3), "engineSize"] = np.nan
     df.loc[~df["year"].between(1990, 2020), "year"] = np.nan
     df.loc[~df["previousOwners"].between(0, 6), "previousOwners"] = np.nan
+    
     mask = (df['year'] % 1 != 0)
     df.loc[mask, 'year'] = np.nan
     mask = (df['mileage'] % 1 != 0)
@@ -1192,21 +1127,18 @@ def clean_data(df):
     mask = df['engineSize'] != df['engineSize'].round(1)
     df.loc[mask, 'engineSize'] = np.nan
 
-    # Numeric Transformations
     df['mileage'] = np.log1p(df['mileage'])
     df['mpg'] = np.log1p(df['mpg'])
     df['tax'] = np.log1p(df['tax'])
     
-    # Types and Rounding
     df["previousOwners"] = pd.to_numeric(df["previousOwners"], errors='coerce').round().astype("Int64")
     df["year"] = pd.to_numeric(df["year"], errors='coerce').round().astype("Int64")
     
-    # Imputation
-    df = f.fill_NaN_with_categorical(df, "Brand", ["model","transmission","fuelType"])
-    df = f.fill_NaN_with_categorical(df, "Brand", ["model","transmission"])
-    df = f.fill_NaN_with_categorical(df, "model", ["Brand","transmission","fuelType"])
-    df = f.fill_NaN_with_categorical(df, "model", ["Brand","transmission"])
-    df = f.fill_NaN_with_categorical(df, "mpg", ["model","fuelType"])
+    df = f.fill_NaN_with_categorical(df, "Brand", ["model", "transmission", "fuelType"])
+    df = f.fill_NaN_with_categorical(df, "Brand", ["model", "transmission"])
+    df = f.fill_NaN_with_categorical(df, "model", ["Brand", "transmission", "fuelType"])
+    df = f.fill_NaN_with_categorical(df, "model", ["Brand", "transmission"])
+    df = f.fill_NaN_with_categorical(df, "mpg", ["model", "fuelType"])
     
     df["transmission"] = df["transmission"].transform(lambda x: x.fillna(x.mode()[0] if not x.mode().empty else np.nan))
     df["fuelType"] = df["fuelType"].transform(lambda x: x.fillna(x.mode()[0] if not x.mode().empty else np.nan))
@@ -1218,13 +1150,11 @@ def clean_data(df):
 
     df["previousOwners"] = df["previousOwners"].transform(lambda x: x.fillna(x.median())).round().astype("Int64")
     
-    
-    # Residual Fill
     numeric_cols = df.select_dtypes(include=["number"]).columns.drop(["carID", "price"], errors='ignore')
     for col in numeric_cols:
         df[col] = df[col].astype(float)
-        global_mean = df[col].median()
-        df[col] = df[col].fillna(global_mean)
+        global_median = df[col].median()
+        df[col] = df[col].fillna(global_median)
         if "Int64" in str(df[col].dtype):
             df[col] = df[col].round().astype("Int64")
             
