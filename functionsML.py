@@ -564,6 +564,82 @@ def predict_group(df, model, scaler, mapping, g_mean, train_cols):
     return pd.DataFrame({"carID": df["carID"], "price": preds})
 
 
+def calculate_global_split_mae(train_lux, val_lux, model_lux, train_oth, val_oth, model_oth, model_type="rf"):
+    """
+    Recalculates the Global MAE and R2 by combining two groups (Split approach).
+    Returns: (global_mae, global_r2)
+    """
+    
+    # Define which model class to use
+    if model_type == "rf":
+        ModelClass = RandomForestRegressor
+    elif model_type == "et":
+        ModelClass = ExtraTreesRegressor
+    elif model_type == "hgb":
+        ModelClass = HistGradientBoostingRegressor
+    else:
+        raise ValueError(f"Unknown model type: {model_type}. Use 'rf', 'et' or 'hgb'.")
+
+    # Internal function to process and predict a single group
+    def get_honest_predictions(train_df, val_df, trained_model):
+        # --- DATA PREPARATION ---
+        mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
+        global_mean = train_df["price_log"].mean()
+        
+        train_len = len(train_df)
+        combined = pd.concat([train_df, val_df], axis=0)
+        
+        # Encodings
+        combined["Brand_model_encoded"] = combined.apply(
+            lambda x: mapping.get((x["Brand"], x["model"]), global_mean), axis=1
+        )
+        combined = pd.get_dummies(combined, columns=["Brand", "transmission", "fuelType"], drop_first=True)
+        
+        # Split
+        drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
+        X_train = combined.iloc[:train_len].drop(columns=drop_cols, errors='ignore')
+        y_train = combined.iloc[:train_len]["price_log"]
+        X_val = combined.iloc[train_len:].drop(columns=drop_cols, errors='ignore')
+        y_val = combined.iloc[train_len:]["price_log"]
+        
+        # Scaling
+        scaler = MinMaxScaler()
+        X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns)
+        X_val_s = pd.DataFrame(scaler.transform(X_val), columns=X_train.columns)
+        
+        # --- TRAIN HONEST MODEL ---
+        best_params = trained_model.get_params()
+        honest_model = ModelClass(**best_params)
+        honest_model.fit(X_train_s, y_train)
+        
+        # --- PREDICT ---
+        p_val = honest_model.predict(X_val_s)
+        
+        # Convert log -> euros
+        y_val_real = np.expm1(y_val)
+        p_val_real = np.expm1(p_val)
+        
+        return y_val_real.values, p_val_real
+    
+    # --- EXECUTION ---
+    print(f"Calculating Global Metrics for Split ({model_type.upper()})...")
+    
+    # Luxury Group
+    y_true_lux, y_pred_lux = get_honest_predictions(train_lux, val_lux, model_lux)
+    
+    # Others Group
+    y_true_oth, y_pred_oth = get_honest_predictions(train_oth, val_oth, model_oth)
+    
+    # Combine everything
+    y_true_total = np.concatenate([y_true_lux, y_true_oth])
+    y_pred_total = np.concatenate([y_pred_lux, y_pred_oth])
+    
+    # Calculate final error metrics
+    global_mae = mean_absolute_error(y_true_total, y_pred_total)
+    global_r2 = r2_score(y_true_total, y_pred_total)
+    
+    return global_mae, global_r2
+
 def train_and_evaluate_rf(train_df, val_df, group_name):
     """
     Trains and tunes a Random Forest model using RandomizedSearchCV on a specific data group.
@@ -617,7 +693,14 @@ def train_and_evaluate_rf(train_df, val_df, group_name):
         'min_samples_split': randint(2, 10),
         'min_samples_leaf': randint(1, 4)
     }
-    
+
+    # param_dist = {
+    #     'n_estimators': [2085],
+    #     'max_depth': [20],
+    #     'min_samples_split': [5],
+    #     'min_samples_leaf': [1]
+    # }
+
     search = RandomizedSearchCV(
         estimator=rf_model,
         param_distributions=param_dist,
@@ -631,12 +714,14 @@ def train_and_evaluate_rf(train_df, val_df, group_name):
     
     print(f"\n>>> Training Random Forest - Group: {group_name}")
     search.fit(X_comb, y_comb)
+    
+    # This model is trained on FULL data (Train + Val) -> Good for return/saving
     best_rf_split = search.best_estimator_
     
     # --- C. RESULTS PRESENTATION ---
     print(f"Best Params ({group_name}): {search.best_params_}")
     
-    # Best CV Score (MAE Log)
+    # Best CV Score (MAE Log) - This is honest because it comes from the CV loop
     print(f"Top MAE (log scale): {-search.best_score_:.4f}") 
 
     # Retrieve R2 corresponding to best MAE
@@ -645,9 +730,14 @@ def train_and_evaluate_rf(train_df, val_df, group_name):
     r2_score_val = results['mean_test_R2'][best_index]
     print(f"Corresponding R2 Score: {r2_score_val:.4f}")
     
-    # --- D. REAL METRICS (TRAIN VS VALIDATION IN EUROS) ---
-    p_train = best_rf_split.predict(X_train_s)
-    p_val = best_rf_split.predict(X_val_s)
+    # --- D. REAL METRICS (HONEST EVALUATION) ---
+    # FIX: We create a temporary model trained ONLY on X_train_s to check for overfitting
+    model_for_eval = RandomForestRegressor(**search.best_params_, random_state=42, n_jobs=-1)
+    model_for_eval.fit(X_train_s, y_train)
+    
+    # Predict using the honest model
+    p_train = model_for_eval.predict(X_train_s)
+    p_val = model_for_eval.predict(X_val_s)
     
     # Convert back to Euros
     y_train_real = np.expm1(y_train)
@@ -660,13 +750,14 @@ def train_and_evaluate_rf(train_df, val_df, group_name):
     mae_val = mean_absolute_error(y_val_real, p_val_real)
     
     print("-" * 40)
-    print(f"[{group_name} - REAL VALUES]")
+    print(f"[{group_name} - REAL HONEST VALUES]")
     print(f"MAE Train: €{mae_train:.2f} | MAE Validation: €{mae_val:.2f}")
     
     # Gap based on MAE
     gap = (mae_val - mae_train) / mae_train * 100
     print(f"Overfit Gap (MAE): {gap:.2f}%")
     
+    # Returns the model trained on EVERYTHING (for maximum power later)
     return best_rf_split, scaler, mapping, global_mean, train_cols
 
 
@@ -724,6 +815,15 @@ def train_and_evaluate_et(train_df, val_df, group_name):
         'min_samples_leaf': [1, 2, 4, 8],
         'min_samples_split': [2, 5, 10]
     }
+
+
+    # param_dist = {
+    # 'n_estimators': [500],
+    # 'min_samples_split': [10],
+    # 'min_samples_leaf': [1],
+    # 'max_features': [0.7],
+    # 'max_depth': [None]
+    # }
     
     search = RandomizedSearchCV(
         estimator=et_model,
@@ -754,8 +854,12 @@ def train_and_evaluate_et(train_df, val_df, group_name):
     print(f"Corresponding R2 Score: {r2_score_val:.4f}")
     
     # --- D. REAL METRICS (TRAIN VS VALIDATION IN EUROS) ---
-    p_train = best_et_split.predict(X_train_s)
-    p_val = best_et_split.predict(X_val_s)
+    model_for_eval = ExtraTreesRegressor(**search.best_params_, random_state=42, n_jobs=-1, bootstrap=False)
+    model_for_eval.fit(X_train_s, y_train)
+    
+    # Predict using the honest model
+    p_train = model_for_eval.predict(X_train_s)
+    p_val = model_for_eval.predict(X_val_s)
     
     # Convert back to Euros
     y_train_real = np.expm1(y_train)
@@ -768,12 +872,14 @@ def train_and_evaluate_et(train_df, val_df, group_name):
     mae_val = mean_absolute_error(y_val_real, p_val_real)
     
     print("-" * 40)
-    print(f"[{group_name} - REAL VALUES]")
-    print(f"MAE Train: €{mae_train:.2f} | MAE Validation: €{mae_val:.2f}")
+    print(f"[{group_name} - REAL HONEST VALUES]")
+    print(f"MAE Train:      €{mae_train:,.2f}") 
+    print(f"MAE Validation: €{mae_val:,.2f}")
     
     # Gap based on MAE
     gap = (mae_val - mae_train) / mae_train * 100
-    print(f"Overfit Gap (MAE): {gap:.2f}%")
+    print(f"Overfit Gap:    {gap:.2f}%")
+   
     
     return best_et_split, scaler, mapping, global_mean, train_cols
 
@@ -838,6 +944,15 @@ def train_and_evaluate_hgb(train_df, val_df, group_name):
         'max_features': [0.3] 
     }
     
+    # param_dist = {
+    #     'max_leaf_nodes': [50],
+    #     'max_iter': [5000],
+    #     'max_features': [0.3],
+    #     'max_depth': [15],
+    #     'learning_rate': [0.05],
+    #     'l2_regularization': [10.0]
+    # }
+
     search = RandomizedSearchCV(
         estimator=hgb_model,
         param_distributions=param_dist,
@@ -867,8 +982,17 @@ def train_and_evaluate_hgb(train_df, val_df, group_name):
     print(f"Corresponding R2 Score: {r2_score_val:.4f}")
     
     # --- D. REAL METRICS (TRAIN VS VALIDATION IN EUROS) ---
-    p_train = best_hgb_split.predict(X_train_s)
-    p_val = best_hgb_split.predict(X_val_s)
+    model_for_eval = HistGradientBoostingRegressor(
+        **search.best_params_, 
+        loss='squared_error',
+        random_state=42, 
+        early_stopping=False
+    )
+    model_for_eval.fit(X_train_s, y_train)
+    
+    # Predict using the honest model
+    p_train = model_for_eval.predict(X_train_s)
+    p_val = model_for_eval.predict(X_val_s)
     
     # Convert back to Euros
     y_train_real = np.expm1(y_train)
@@ -881,27 +1005,29 @@ def train_and_evaluate_hgb(train_df, val_df, group_name):
     mae_val = mean_absolute_error(y_val_real, p_val_real)
     
     print("-" * 40)
-    print(f"[{group_name} - REAL VALUES]")
-    print(f"MAE Train: €{mae_train:.2f} | MAE Validation: €{mae_val:.2f}")
+    print(f"[{group_name} - REAL HONEST VALUES]")
+    print(f"MAE Train:      €{mae_train:,.2f}") 
+    print(f"MAE Validation: €{mae_val:,.2f}")
     
     # Gap based on MAE
+    
     gap = (mae_val - mae_train) / mae_train * 100
-    print(f"Overfit Gap (MAE): {gap:.2f}%")
+    print(f"Overfit Gap:    {gap:.2f}%")
+    
     
     return best_hgb_split, scaler, mapping, global_mean, train_cols
 
 
 def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
     """
-    Generic Stacking function.
-    estimators: List of tuples with models [(name, model), ...]
+    Generic Stacking function with Honest Evaluation.
     """
     print(f"\nSTARTING STACKING (5-Fold CV): {group_name}")
     
-    full_train = pd.concat([train_df, val_df], axis=0).reset_index(drop=True)
-    
-    mapping = full_train.groupby(["Brand", "model"])["price_log"].mean().to_dict()
-    global_mean = full_train["price_log"].mean()
+    # --- 1. DATA PREP (Strictly separate to avoid leakage) ---
+    # Mapping based ONLY on Train
+    mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
+    global_mean = train_df["price_log"].mean()
     
     def apply_encoding_and_prep(df):
         d = df.copy()
@@ -909,48 +1035,88 @@ def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
         d = pd.get_dummies(d, columns=["Brand", "transmission", "fuelType"], drop_first=True)
         return d
 
-    df_full_proc = apply_encoding_and_prep(full_train)
+    # Process separately
+    df_train_proc = apply_encoding_and_prep(train_df)
+    df_val_proc = apply_encoding_and_prep(val_df)
     df_test_proc = apply_encoding_and_prep(test_df)
     
     drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
-    train_cols = df_full_proc.drop(columns=drop_cols, errors='ignore').columns
     
-    X = df_full_proc[train_cols]
-    y = df_full_proc["price_log"]
+    # Align columns based on Train
+    train_cols = df_train_proc.drop(columns=drop_cols, errors='ignore').columns
+    
+    X_train = df_train_proc[train_cols]
+    y_train = df_train_proc["price_log"]
+    
+    X_val = df_val_proc.reindex(columns=train_cols, fill_value=0)
+    y_val = df_val_proc["price_log"]
+    
     X_test = df_test_proc.reindex(columns=train_cols, fill_value=0)
     
+    # Scaling (Fit on Train, Transform others)
+    # Ridge (final_estimator) is sensitive to scale
     scaler = MinMaxScaler()
-    X_s = scaler.fit_transform(X)
+    X_train_s = scaler.fit_transform(X_train)
+    X_val_s = scaler.transform(X_val)
     X_test_s = scaler.transform(X_test)
     
+    # --- 2. MODEL DEFINITION ---
     stack_model = StackingRegressor(
         estimators=estimators, 
         final_estimator=RidgeCV(),
         cv=5,
-        n_jobs=-1,
+        n_jobs=3,
         passthrough=False,
         verbose=1
     )
     
-    print(f"   Training Stack (Involves training {len(estimators)} models x 5 folds)...")
-    stack_model.fit(X_s, y)
+    # --- 3. TRAINING (On TRAIN set only for honest eval) ---
+    print(f"   Training Stack on TRAIN set ({len(X_train)} samples)...")
+    stack_model.fit(X_train_s, y_train)
     
-    print(f"   Stacking Completed!")
+    # --- 4. REAL METRICS (HONEST EVALUATION) ---
+    p_train = stack_model.predict(X_train_s)
+    p_val = stack_model.predict(X_val_s)
+    
+    # Convert Log -> Real Euros
+    y_train_real = np.expm1(y_train)
+    p_train_real = np.expm1(p_train)
+    y_val_real = np.expm1(y_val)
+    p_val_real = np.expm1(p_val)
+    
+    # Calculate Metrics
+    mae_train = mean_absolute_error(y_train_real, p_train_real)
+    mae_val = mean_absolute_error(y_val_real, p_val_real)
+    
+    print("-" * 40)
+    print(f"[{group_name} - REAL HONEST VALUES]")
+    print(f"MAE Train:      €{mae_train:,.2f}") 
+    print(f"MAE Validation: €{mae_val:,.2f}")
+    
+    if mae_train > 0:
+        gap = (mae_val - mae_train) / mae_train * 100
+        print(f"Overfit Gap:    {gap:.2f}%")
+    else:
+        print("Overfit Gap:    N/A")
+    
     try:
         coefs = stack_model.final_estimator_.coef_
         names = [name for name, _ in estimators]
-        print(f"   Meta-Model Weights: {list(zip(names, coefs))}")
+        print(f"Meta-Model Weights: {list(zip(names, np.round(coefs, 2)))}")
     except:
         pass
+    print("-" * 40)
 
+    # --- 5. PREDICT TEST ---
     preds_log = stack_model.predict(X_test_s)
     preds_final = np.expm1(preds_log)
     
-    return pd.DataFrame({
+    submission_df = pd.DataFrame({
         "carID": test_df["carID"].values,
         "price": preds_final
     })
 
+    return submission_df, y_val_real.values, p_val_real, y_train_real.values, p_train_real
 
 def prepare_data_for_ensemble(train_df, val_df):
     """
@@ -1004,8 +1170,9 @@ def predict_ensemble(df, model, scaler, mapping, g_mean, train_cols):
 
 def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
     """
-    Uses RandomizedSearchCV to find the optimal weights for a VotingRegressor ensemble.
+    Uses RandomizedSearchCV to find optimal weights AND returns validation data for global calc.
     """
+
     # --- 1. SETUP ENSEMBLE ---
     estimators_list = list(models_dict.items())
     model_names = [name for name, _ in estimators_list]
@@ -1025,13 +1192,8 @@ def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
     
     voting_base = VotingRegressor(estimators=estimators_list, n_jobs=-1)
     
-    # --- 2. SETUP SCORING & SEARCH ---
-    # We define multiple metrics but refit on MAE
-    scoring_metrics = {
-        'MAE': 'neg_mean_absolute_error',
-        'R2': 'r2'
-    }
-    
+    # --- 2. SEARCH ---
+    scoring_metrics = {'MAE': 'neg_mean_absolute_error', 'R2': 'r2'}
     param_grid = {'weights': weights_combinations}
     
     search = RandomizedSearchCV(
@@ -1048,23 +1210,13 @@ def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
     
     print(f"\n>>> Optimizing Ensemble Weights for {group_name}...")
     search.fit(X, y)
-    best_ensemble = search.best_estimator_
+    best_ensemble = search.best_estimator_ 
     
-    # --- 3. RESULTS PRESENTATION ---
+    # --- 3. HONEST EVALUATION (Train vs Val) ---
     best_weights = search.best_params_['weights']
-    
     print(f"Best Weights: {list(zip(model_names, best_weights))}")
-    print(f"Top MAE (log scale): {-search.best_score_:.4f}")
     
-    # Get corresponding R2 from CV results
-    results = search.cv_results_
-    best_index = search.best_index_
-    r2_score_val = results['mean_test_R2'][best_index]
-    print(f"Corresponding R2 Score: {r2_score_val:.4f}")
-
-    # --- 4. REAL WORLD METRICS (TRAIN VS VALIDATION) ---
-    # We need to split X and y back to calculate metrics manually
-    # -1 is Train, 0 is Validation in PredefinedSplit
+    
     train_indices = np.where(ps.test_fold == -1)[0]
     val_indices = np.where(ps.test_fold == 0)[0]
     
@@ -1073,33 +1225,72 @@ def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
     X_val_s = X.iloc[val_indices]
     y_val = y.iloc[val_indices]
     
-    # Predictions
-    p_train = best_ensemble.predict(X_train_s)
-    p_val = best_ensemble.predict(X_val_s)
+    honest_ensemble = VotingRegressor(
+        estimators=estimators_list, 
+        weights=best_weights, 
+        n_jobs=-1
+    )
+    honest_ensemble.fit(X_train_s, y_train)
     
-    # Convert Log -> Real Euros
+   
+    p_train = honest_ensemble.predict(X_train_s)
+    p_val = honest_ensemble.predict(X_val_s)
+    
     y_train_real = np.expm1(y_train)
     p_train_real = np.expm1(p_train)
     y_val_real = np.expm1(y_val)
     p_val_real = np.expm1(p_val)
     
-    # Calculate Metrics
+    # Prints
     mae_train = mean_absolute_error(y_train_real, p_train_real)
     mae_val = mean_absolute_error(y_val_real, p_val_real)
     
-    r2_train_real = r2_score(y_train_real, p_train_real)
-    r2_val_real = r2_score(y_val_real, p_val_real)
-    
     print("-" * 40)
-    print(f"[{group_name} - REAL VALUES]")
-    print(f"MAE Train: €{mae_train:.2f} | MAE Validation: €{mae_val:.2f}")
-    print(f"R2 Train: {r2_train_real:.4f}   | R2 Validation: {r2_val_real:.4f}")
-    
+    print(f"[{group_name} - REAL HONEST VALUES]")
+    print(f"MAE Train:      €{mae_train:,.2f}") 
+    print(f"MAE Validation: €{mae_val:,.2f}")
     gap = (mae_val - mae_train) / mae_train * 100
-    print(f"Overfit Gap (MAE): {gap:.2f}%")
-    
-    return best_ensemble
+    print(f"Overfit Gap:    {gap:.2f}%")
+    print("-" * 40)
 
+    return best_ensemble, y_val_real, p_val_real
+
+def evaluate_model_comprehensive(model, X_train, y_train, X_val, y_val, model_name="Model"):
+    """
+    Evaluates any model (RF, ET, HGB, Ensemble), calculates real metrics (Euros),
+    checks for overfitting, and plots the residuals.
+    """
+    
+    print(f"\n{'='*20} EVALUATION: {model_name.upper()} {'='*20}")
+    
+    # --- 1. PREDICTIONS (LOG SCALE) ---
+    pred_train_log = model.predict(X_train)
+    pred_val_log = model.predict(X_val)
+    
+    # --- 2. CONVERSION TO EUROS (INVERSE LOG) ---
+    y_train_real = np.expm1(y_train)
+    p_train_real = np.expm1(pred_train_log)
+    
+    y_val_real = np.expm1(y_val)
+    p_val_real = np.expm1(pred_val_log)
+    
+    # --- 3. METRICS CALCULATION ---
+    mae_train = mean_absolute_error(y_train_real, p_train_real)
+    mae_val = mean_absolute_error(y_val_real, p_val_real)
+    r2_val = r2_score(y_val_real, p_val_real)
+    
+    # Overfitting Gap
+    if mae_train > 0:
+        gap = (mae_val - mae_train) / mae_train * 100
+    else:
+        gap = 0 
+
+    # --- 4. PRINT RESULTS ---
+    print(f"MAE Train:      € {mae_train:,.2f}")
+    print(f"MAE Validation: € {mae_val:,.2f}")
+    print(f"R2 Score:       {r2_val:.4f}")
+    print(f"Overfit Gap:    {gap:.2f}%")
+    
 
 def clean_data(df):
     """
