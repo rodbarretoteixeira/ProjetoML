@@ -651,67 +651,6 @@ def kfold_target_encode(train_df, cat_cols, target_col, id_col='carID', n_splits
     return df[[*train_df.columns, encoded_col]]
 
 
-import pandas as pd
-import numpy as np
-import random
-from scipy.stats import randint
-from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor, HistGradientBoostingRegressor, StackingRegressor, VotingRegressor
-from sklearn.model_selection import RandomizedSearchCV, PredefinedSplit, RidgeCV
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-
-def check_overfitting(model, X_train, y_train, X_val, y_val, model_name="Model"):
-    """
-    Analyzes Overfitting by comparing Train vs Validation metrics.
-    Assumes target (y) is in LOG scale and converts to EUROS for reporting.
-    """
-    
-    # 1. Predictions
-    pred_train_log = model.predict(X_train)
-    pred_val_log = model.predict(X_val)
-    
-    # 2. Revert to Real Scale (Euros)
-    y_train_real = np.expm1(y_train)
-    y_val_real = np.expm1(y_val)
-    pred_train_real = np.expm1(pred_train_log)
-    pred_val_real = np.expm1(pred_val_log)
-    
-    # 3. Calculate Metrics
-    r2_train = r2_score(y_train, pred_train_log)
-    r2_val = r2_score(y_val, pred_val_log)
-    
-    rmse_train = np.sqrt(mean_squared_error(y_train_real, pred_train_real))
-    rmse_val = np.sqrt(mean_squared_error(y_val_real, pred_val_real))
-    
-    # 4. Calculate the Gap
-    rmse_gap_perc = ((rmse_val - rmse_train) / rmse_train) * 100
-    r2_drop = r2_train - r2_val
-    
-    # 5. Display Table
-    df_metrics = pd.DataFrame({
-        "Metric": ["RMSE (Error in Euro)", "R2 (Score)"],
-        "Train": [f"{rmse_train:.2f}Euro", f"{r2_train:.4f}"],
-        "Validation": [f"{rmse_val:.2f}Euro", f"{r2_val:.4f}"],
-        "Difference (Gap)": [f"+{rmse_gap_perc:.1f}%", f"-{r2_drop:.4f}"]
-    })
-    
-    print(f"\nOVERFIT ANALYSIS: {model_name.upper()}")
-    print("="*60)
-    print(df_metrics.to_string(index=False))
-    print("-" * 60)
-    
-    # 6. Automatic Verdict
-    if r2_val > r2_train:
-        print("EXCELLENT: The model generalizes better than in training (slight underfitting or luck).")
-    elif rmse_gap_perc < 10 and r2_drop < 0.03:
-        print("HEALTHY: The model is robust. Validation error is close to training.")
-    elif rmse_gap_perc < 20:
-        print("WARNING: Some Overfitting. The model is starting to memorize training data.")
-    else:
-        print("DANGER: Severe Overfitting! The model memorized training and fails in validation.")
-        
-    return df_metrics
-
 
 def predict_group(df, model, scaler, mapping, g_mean, train_cols):
     if df.empty: return pd.DataFrame()
@@ -736,35 +675,49 @@ def predict_group(df, model, scaler, mapping, g_mean, train_cols):
 
 
 def train_and_evaluate_rf(train_df, val_df, group_name):
-    # A. Target Encoding
+    # --- A. DATA PREPARATION (Encoding & Scaling) ---
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = train_df["price_log"].mean()
     
-    # B. Encoding & Prep
     train_len = len(train_df)
     combined = pd.concat([train_df, val_df], axis=0)
+    
+    # Target Encoding
     combined["Brand_model_encoded"] = combined.apply(
         lambda x: mapping.get((x["Brand"], x["model"]), global_mean), axis=1
     )
+    
+    # One-Hot Encoding
     combined = pd.get_dummies(combined, columns=["Brand", "transmission", "fuelType"], drop_first=True)
     
+    # Split X and y
     drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
     X_train = combined.iloc[:train_len].drop(columns=drop_cols, errors='ignore')
     y_train = combined.iloc[:train_len]["price_log"]
     X_val = combined.iloc[train_len:].drop(columns=drop_cols, errors='ignore')
     y_val = combined.iloc[train_len:]["price_log"]
     
+    # Scaling
     train_cols = X_train.columns
     scaler = MinMaxScaler()
     X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=train_cols)
     X_val_s = pd.DataFrame(scaler.transform(X_val), columns=train_cols)
     
-    # C. Randomized Search
+    # Combine for RandomizedSearch
     X_comb = pd.concat([X_train_s, X_val_s], axis=0).reset_index(drop=True)
     y_comb = pd.concat([y_train, y_val], axis=0).reset_index(drop=True)
+    
+    # Predefined Split
     ps = PredefinedSplit([-1]*len(X_train_s) + [0]*len(X_val_s))
     
-    rf = RandomForestRegressor(random_state=42, n_jobs=-1)
+    # --- B. MODEL & GRID DEFINITION ---
+    rf_model = RandomForestRegressor(random_state=42, n_jobs=-1)
+    
+    scoring_metrics = {
+        'MAE': 'neg_mean_absolute_error',
+        'R2': 'r2'
+    }
+    
     param_dist = {
         'n_estimators': [500, 1000],
         'max_depth': [10, 15, 20, 30, None],
@@ -773,182 +726,269 @@ def train_and_evaluate_rf(train_df, val_df, group_name):
     }
     
     search = RandomizedSearchCV(
-        estimator=rf, param_distributions=param_dist, n_iter=50, 
-        cv=ps, scoring='neg_root_mean_squared_error', n_jobs=-1, random_state=42
+        estimator=rf_model,
+        param_distributions=param_dist,
+        n_iter=50, 
+        cv=ps, 
+        scoring=scoring_metrics, 
+        n_jobs=-1, 
+        random_state=42,
+        refit="MAE"
     )
     
-    print(f"\nTraining Group: {group_name}")
+    print(f"\n>>> Training Random Forest - Group: {group_name}")
     search.fit(X_comb, y_comb)
     best_rf_split = search.best_estimator_
     
-    # D. Overfit Analysis
+    # --- C. RESULTS PRESENTATION ---
+    print(f"Best Params ({group_name}): {search.best_params_}")
+    
+    # Best CV Score (MAE Log)
+    print(f"Top MAE (log scale): {-search.best_score_:.4f}") 
+
+    # Retrieve R2 corresponding to best MAE
+    results = search.cv_results_
+    best_index = search.best_index_
+    r2_score_val = results['mean_test_R2'][best_index]
+    print(f"Corresponding R2 Score: {r2_score_val:.4f}")
+    
+    # --- D. REAL METRICS (TRAIN VS VALIDATION IN EUROS) ---
     p_train = best_rf_split.predict(X_train_s)
     p_val = best_rf_split.predict(X_val_s)
     
-    r2_train = r2_score(y_train, p_train)
-    r2_val = r2_score(y_val, p_val)
+    # Convert back to Euros
+    y_train_real = np.expm1(y_train)
+    p_train_real = np.expm1(p_train)
+    y_val_real = np.expm1(y_val)
+    p_val_real = np.expm1(p_val)
     
-    rmse_train = np.sqrt(mean_squared_error(np.expm1(y_train), np.expm1(p_train)))
-    rmse_val = np.sqrt(mean_squared_error(np.expm1(y_val), np.expm1(p_val)))
+    # Calculate MAE Only
+    mae_train = mean_absolute_error(y_train_real, p_train_real)
+    mae_val = mean_absolute_error(y_val_real, p_val_real)
     
-    print(f"[{group_name}] R2 Train: {r2_train:.4f} | R2 Validation: {r2_val:.4f}")
-    print(f"[{group_name}] RMSE Train: {rmse_train:.2f}Euro | RMSE Validation: {rmse_val:.2f}Euro")
+    print("-" * 40)
+    print(f"[{group_name} - REAL VALUES]")
+    print(f"MAE Train: €{mae_train:.2f} | MAE Validation: €{mae_val:.2f}")
     
-    gap = (rmse_val - rmse_train) / rmse_train * 100
-    print(f"[{group_name}] Overfit Gap: {gap:.2f}%")
+    # Gap based on MAE
+    gap = (mae_val - mae_train) / mae_train * 100
+    print(f"Overfit Gap (MAE): {gap:.2f}%")
     
     return best_rf_split, scaler, mapping, global_mean, train_cols
 
-
 def train_and_evaluate_et(train_df, val_df, group_name):
+    # --- A. DATA PREPARATION (Encoding & Scaling) ---
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = train_df["price_log"].mean()
     
     train_len = len(train_df)
     combined = pd.concat([train_df, val_df], axis=0)
     
+    # Target Encoding
     combined["Brand_model_encoded"] = combined.apply(
         lambda x: mapping.get((x["Brand"], x["model"]), global_mean), axis=1
     )
     
+    # One-Hot Encoding
     combined = pd.get_dummies(combined, columns=["Brand", "transmission", "fuelType"], drop_first=True)
     
+    # Split X and y
     drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
     X_train = combined.iloc[:train_len].drop(columns=drop_cols, errors='ignore')
     y_train = combined.iloc[:train_len]["price_log"]
     X_val = combined.iloc[train_len:].drop(columns=drop_cols, errors='ignore')
     y_val = combined.iloc[train_len:]["price_log"]
     
+    # Scaling
     train_cols = X_train.columns
     scaler = MinMaxScaler()
     X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=train_cols)
     X_val_s = pd.DataFrame(scaler.transform(X_val), columns=train_cols)
     
+    # Combine for RandomizedSearch
     X_comb = pd.concat([X_train_s, X_val_s], axis=0).reset_index(drop=True)
     y_comb = pd.concat([y_train, y_val], axis=0).reset_index(drop=True)
     
+    # Predefined Split
     ps = PredefinedSplit([-1]*len(X_train_s) + [0]*len(X_val_s))
     
+    # --- B. MODEL & GRID DEFINITION ---
     et_model = ExtraTreesRegressor(random_state=42, n_jobs=-1, bootstrap=False)
     
+    scoring_metrics = {
+        'MAE': 'neg_mean_absolute_error',
+        'R2': 'r2'
+    }
+
     param_dist = {
-        'n_estimators': [500],
-        'max_features': [1.0],
-        'max_depth': [30],
-        'min_samples_leaf': [1],
-        'min_samples_split': [10]
+        'n_estimators': [500, 1000, 2000],
+        'max_features': [0.7, 0.8, 0.9, 1.0],
+        'max_depth': [None, 20, 30, 40],
+        'min_samples_leaf': [1, 2, 4, 8],
+        'min_samples_split': [2, 5, 10]
     }
     
     search = RandomizedSearchCV(
-        estimator=et_model, 
-        param_distributions=param_dist, 
-        n_iter=50, 
-        cv=ps, 
-        scoring='neg_root_mean_squared_error', 
-        n_jobs=-1, 
+        estimator=et_model,
+        param_distributions=param_dist,
+        n_iter=50,            
+        cv=ps,                
+        scoring=scoring_metrics,
+        verbose=1,
+        n_jobs=-1,
         random_state=42,
-        verbose=1
+        refit="MAE"           
     )
     
-    print(f"\nTraining ExtraTrees - Group: {group_name}")
+    print(f"\n>>> Training ExtraTrees - Group: {group_name}")
     search.fit(X_comb, y_comb)
     best_et_split = search.best_estimator_
+    
+    # --- C. RESULTS PRESENTATION ---
     print(f"Best Params ({group_name}): {search.best_params_}")
     
+    # Best CV Score (MAE Log)
+    print(f"Top MAE (log scale): {-search.best_score_:.4f}") 
+
+    # Retrieve R2 corresponding to best MAE
+    results = search.cv_results_
+    best_index = search.best_index_
+    r2_score_val = results['mean_test_R2'][best_index]
+    print(f"Corresponding R2 Score: {r2_score_val:.4f}")
+    
+    # --- D. REAL METRICS (TRAIN VS VALIDATION IN EUROS) ---
     p_train = best_et_split.predict(X_train_s)
     p_val = best_et_split.predict(X_val_s)
     
-    r2_train = r2_score(y_train, p_train)
-    r2_val = r2_score(y_val, p_val)
+    # Convert back to Euros
+    y_train_real = np.expm1(y_train)
+    p_train_real = np.expm1(p_train)
+    y_val_real = np.expm1(y_val)
+    p_val_real = np.expm1(p_val)
     
-    rmse_train = np.sqrt(mean_squared_error(np.expm1(y_train), np.expm1(p_train)))
-    rmse_val = np.sqrt(mean_squared_error(np.expm1(y_val), np.expm1(p_val)))
+    # Calculate MAE Only
+    mae_train = mean_absolute_error(y_train_real, p_train_real)
+    mae_val = mean_absolute_error(y_val_real, p_val_real)
     
-    print(f"[{group_name}] R2 Train: {r2_train:.4f} | R2 Validation: {r2_val:.4f}")
-    print(f"[{group_name}] RMSE Train: {rmse_train:.2f}Euro | RMSE Validation: {rmse_val:.2f}Euro")
+    print("-" * 40)
+    print(f"[{group_name} - REAL VALUES]")
+    print(f"MAE Train: €{mae_train:.2f} | MAE Validation: €{mae_val:.2f}")
     
-    gap = (rmse_val - rmse_train) / rmse_train * 100
-    print(f"[{group_name}] Overfit Gap: {gap:.2f}%")
+    # Gap based on MAE
+    gap = (mae_val - mae_train) / mae_train * 100
+    print(f"Overfit Gap (MAE): {gap:.2f}%")
     
     return best_et_split, scaler, mapping, global_mean, train_cols
 
-
 def train_and_evaluate_hgb(train_df, val_df, group_name):
+    # --- A. DATA PREPARATION (Encoding & Scaling) ---
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = train_df["price_log"].mean()
     
     train_len = len(train_df)
     combined = pd.concat([train_df, val_df], axis=0)
     
+    # Target Encoding
     combined["Brand_model_encoded"] = combined.apply(
         lambda x: mapping.get((x["Brand"], x["model"]), global_mean), axis=1
     )
     
+    # One-Hot Encoding
     combined = pd.get_dummies(combined, columns=["Brand", "transmission", "fuelType"], drop_first=True)
     
+    # Split X and y
     drop_cols = ["price", "price_log", "carID", "model", "previousOwners"]
     X_train = combined.iloc[:train_len].drop(columns=drop_cols, errors='ignore')
     y_train = combined.iloc[:train_len]["price_log"]
     X_val = combined.iloc[train_len:].drop(columns=drop_cols, errors='ignore')
     y_val = combined.iloc[train_len:]["price_log"]
     
+    # Scaling
     train_cols = X_train.columns
     scaler = MinMaxScaler()
     X_train_s = pd.DataFrame(scaler.fit_transform(X_train), columns=train_cols)
     X_val_s = pd.DataFrame(scaler.transform(X_val), columns=train_cols)
     
+    # Combine for RandomizedSearch
     X_comb = pd.concat([X_train_s, X_val_s], axis=0).reset_index(drop=True)
     y_comb = pd.concat([y_train, y_val], axis=0).reset_index(drop=True)
     
+    # Predefined Split
     ps = PredefinedSplit([-1]*len(X_train_s) + [0]*len(X_val_s))
     
+    # --- B. MODEL & GRID DEFINITION ---
     hgb_model = HistGradientBoostingRegressor(
         loss='squared_error',
         random_state=42,
         early_stopping=False 
     )
     
+    scoring_metrics = {
+        'MAE': 'neg_mean_absolute_error',
+        'R2': 'r2'
+    }
+
     param_dist = {
-        'l2_regularization': [0.5], 
-        'max_leaf_nodes': [80], 
-        'max_depth': [10], 
-        'learning_rate': [0.05],
-        'max_iter': [3000],
+        'l2_regularization': [0.5, 1.0, 5.0, 10.0], 
+        'max_leaf_nodes': [31, 50, 80], 
+        'max_depth': [10, 15, 20], 
+        'learning_rate': [0.01, 0.02, 0.05],
+        'max_iter': [3000, 5000],
         'max_features': [0.3] 
     }
     
     search = RandomizedSearchCV(
-        estimator=hgb_model, 
-        param_distributions=param_dist, 
-        n_iter=50, 
-        cv=ps, 
-        scoring='neg_root_mean_squared_error', 
-        n_jobs=-1, 
+        estimator=hgb_model,
+        param_distributions=param_dist,
+        n_iter=50,            
+        cv=ps,                
+        scoring=scoring_metrics,
+        verbose=1,
+        n_jobs=-1,
         random_state=42,
-        verbose=1
+        refit="MAE"           
     )
     
-    print(f"\nTraining HistGB - Group: {group_name}")
+    print(f"\n>>> Training HistGB - Group: {group_name}")
     search.fit(X_comb, y_comb)
     best_hgb_split = search.best_estimator_
+    
+    # --- C. RESULTS PRESENTATION ---
     print(f"Best Params ({group_name}): {search.best_params_}")
     
+    # Best CV Score (MAE Log)
+    print(f"Top MAE (log scale): {-search.best_score_:.4f}") 
+
+    # Retrieve R2 corresponding to best MAE
+    results = search.cv_results_
+    best_index = search.best_index_
+    r2_score_val = results['mean_test_R2'][best_index]
+    print(f"Corresponding R2 Score: {r2_score_val:.4f}")
+    
+    # --- D. REAL METRICS (TRAIN VS VALIDATION IN EUROS) ---
     p_train = best_hgb_split.predict(X_train_s)
     p_val = best_hgb_split.predict(X_val_s)
     
-    r2_train = r2_score(y_train, p_train)
-    r2_val = r2_score(y_val, p_val)
+    # Convert back to Euros
+    y_train_real = np.expm1(y_train)
+    p_train_real = np.expm1(p_train)
+    y_val_real = np.expm1(y_val)
+    p_val_real = np.expm1(p_val)
     
-    rmse_train = np.sqrt(mean_squared_error(np.expm1(y_train), np.expm1(p_train)))
-    rmse_val = np.sqrt(mean_squared_error(np.expm1(y_val), np.expm1(p_val)))
+    # Calculate MAE Only
+    mae_train = mean_absolute_error(y_train_real, p_train_real)
+    mae_val = mean_absolute_error(y_val_real, p_val_real)
     
-    print(f"[{group_name}] R2 Train: {r2_train:.4f} | R2 Validation: {r2_val:.4f}")
-    print(f"[{group_name}] RMSE Train: {rmse_train:.2f}Euro | RMSE Validation: {rmse_val:.2f}Euro")
+    print("-" * 40)
+    print(f"[{group_name} - REAL VALUES]")
+    print(f"MAE Train: €{mae_train:.2f} | MAE Validation: €{mae_val:.2f}")
     
-    gap = (rmse_val - rmse_train) / rmse_train * 100
-    print(f"[{group_name}] Overfit Gap: {gap:.2f}%")
+    # Gap based on MAE
+    gap = (mae_val - mae_train) / mae_train * 100
+    print(f"Overfit Gap (MAE): {gap:.2f}%")
     
     return best_hgb_split, scaler, mapping, global_mean, train_cols
+
 
 
 def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
@@ -1057,10 +1097,12 @@ def predict_ensemble(df, model, scaler, mapping, g_mean, train_cols):
 
 
 def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
+    # --- 1. SETUP ENSEMBLE ---
     estimators_list = list(models_dict.items())
     model_names = [name for name, _ in estimators_list]
     n_models = len(estimators_list)
     
+    # Generate random weights
     random.seed(42)
     weights_combinations = []
     for _ in range(100): 
@@ -1073,6 +1115,14 @@ def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
     weights_combinations.append([1] * n_models) 
     
     voting_base = VotingRegressor(estimators=estimators_list, n_jobs=-1)
+    
+    # --- 2. SETUP SCORING & SEARCH ---
+    # We define multiple metrics but refit on MAE
+    scoring_metrics = {
+        'MAE': 'neg_mean_absolute_error',
+        'R2': 'r2'
+    }
+    
     param_grid = {'weights': weights_combinations}
     
     search = RandomizedSearchCV(
@@ -1080,21 +1130,66 @@ def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
         param_distributions=param_grid,
         n_iter=50,
         cv=ps,
-        scoring='neg_root_mean_squared_error',
+        scoring=scoring_metrics,
         verbose=1,
         n_jobs=-1,
-        random_state=42
+        random_state=42,
+        refit="MAE" 
     )
     
-    print(f"\n Optimizing Weights for {group_name}...")
+    print(f"\n>>> Optimizing Ensemble Weights for {group_name}...")
     search.fit(X, y)
+    best_ensemble = search.best_estimator_
     
+    # --- 3. RESULTS PRESENTATION ---
     best_weights = search.best_params_['weights']
-    print(f" Best RMSE ({group_name}): {-search.best_score_:.5f}")
-    print(f" Ideal Weights: {list(zip(model_names, best_weights))}")
     
-    return search.best_estimator_
+    print(f"Best Weights: {list(zip(model_names, best_weights))}")
+    print(f"Top MAE (log scale): {-search.best_score_:.4f}")
+    
+    # Get corresponding R2 from CV results
+    results = search.cv_results_
+    best_index = search.best_index_
+    r2_score_val = results['mean_test_R2'][best_index]
+    print(f"Corresponding R2 Score: {r2_score_val:.4f}")
 
+    # --- 4. REAL WORLD METRICS (TRAIN VS VALIDATION) ---
+    # We need to split X and y back to calculate metrics manually
+    # -1 is Train, 0 is Validation in PredefinedSplit
+    train_indices = np.where(ps.test_fold == -1)[0]
+    val_indices = np.where(ps.test_fold == 0)[0]
+    
+    X_train_s = X.iloc[train_indices]
+    y_train = y.iloc[train_indices]
+    X_val_s = X.iloc[val_indices]
+    y_val = y.iloc[val_indices]
+    
+    # Predictions
+    p_train = best_ensemble.predict(X_train_s)
+    p_val = best_ensemble.predict(X_val_s)
+    
+    # Convert Log -> Real Euros
+    y_train_real = np.expm1(y_train)
+    p_train_real = np.expm1(p_train)
+    y_val_real = np.expm1(y_val)
+    p_val_real = np.expm1(p_val)
+    
+    # Calculate Metrics
+    mae_train = mean_absolute_error(y_train_real, p_train_real)
+    mae_val = mean_absolute_error(y_val_real, p_val_real)
+    
+    r2_train_real = r2_score(y_train_real, p_train_real)
+    r2_val_real = r2_score(y_val_real, p_val_real)
+    
+    print("-" * 40)
+    print(f"[{group_name} - REAL VALUES]")
+    print(f"MAE Train: €{mae_train:.2f} | MAE Validation: €{mae_val:.2f}")
+    print(f"R2 Train: {r2_train_real:.4f}   | R2 Validation: {r2_val_real:.4f}")
+    
+    gap = (mae_val - mae_train) / mae_train * 100
+    print(f"Overfit Gap (MAE): {gap:.2f}%")
+    
+    return best_ensemble
 
 def clean_data(df):
     df = df.copy()
@@ -1104,7 +1199,7 @@ def clean_data(df):
     text_cols = df.select_dtypes(include=["object"]).columns
     df[text_cols] = df[text_cols].apply(lambda x: x.str.lower() if x.dtype=="object" else x)
     for col in df.select_dtypes(include="object").columns:
-        df = f.fix_typos(col, df)
+        df = fix_typos(col, df)
 
     df['transmission'] = df['transmission'].replace('other', 'unknown')
     df['fuelType'] = df['fuelType'].replace('other', 'electric')
@@ -1134,19 +1229,19 @@ def clean_data(df):
     df["previousOwners"] = pd.to_numeric(df["previousOwners"], errors='coerce').round().astype("Int64")
     df["year"] = pd.to_numeric(df["year"], errors='coerce').round().astype("Int64")
     
-    df = f.fill_NaN_with_categorical(df, "Brand", ["model", "transmission", "fuelType"])
-    df = f.fill_NaN_with_categorical(df, "Brand", ["model", "transmission"])
-    df = f.fill_NaN_with_categorical(df, "model", ["Brand", "transmission", "fuelType"])
-    df = f.fill_NaN_with_categorical(df, "model", ["Brand", "transmission"])
-    df = f.fill_NaN_with_categorical(df, "mpg", ["model", "fuelType"])
+    df = fill_NaN_with_categorical(df, "Brand", ["model", "transmission", "fuelType"])
+    df = fill_NaN_with_categorical(df, "Brand", ["model", "transmission"])
+    df = fill_NaN_with_categorical(df, "model", ["Brand", "transmission", "fuelType"])
+    df = fill_NaN_with_categorical(df, "model", ["Brand", "transmission"])
+    df = fill_NaN_with_categorical(df, "mpg", ["model", "fuelType"])
     
     df["transmission"] = df["transmission"].transform(lambda x: x.fillna(x.mode()[0] if not x.mode().empty else np.nan))
     df["fuelType"] = df["fuelType"].transform(lambda x: x.fillna(x.mode()[0] if not x.mode().empty else np.nan))
 
-    df = f.fill_NaN_with_mixed(df, "year", "model", "mileage")
-    df = f.fill_NaN_with_mixed(df, "mileage", "model", "year")
-    df = f.fill_NaN_with_mixed(df, "tax", "model", "year")
-    df = f.fill_NaN_with_mixed(df, "engineSize", "model", "tax")
+    df = fill_NaN_with_mixed(df, "year", "model", "mileage")
+    df = fill_NaN_with_mixed(df, "mileage", "model", "year")
+    df = fill_NaN_with_mixed(df, "tax", "model", "year")
+    df = fill_NaN_with_mixed(df, "engineSize", "model", "tax")
 
     df["previousOwners"] = df["previousOwners"].transform(lambda x: x.fillna(x.median())).round().astype("Int64")
     
