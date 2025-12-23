@@ -20,10 +20,13 @@ from sklearn.ensemble import StackingRegressor
 import random
 from sklearn.ensemble import VotingRegressor
 from sklearn.model_selection import RandomizedSearchCV, PredefinedSplit
+from scipy.stats import randint
 
 def fix_typos(col, db):
-    """Fix edge typos, prioritizing matching first letters, then falling back."""
-   
+    """
+    Fix edge typos, prioritizing matching first letters, then falling back.
+    Cleans string values by lowercasing, stripping, and handling spacing.
+    """
     db[col] = db[col].apply(lambda x: x.lower().strip().replace(r'\s+', ' ') if pd.notna(x) else x)
     unique_values = db[col].dropna().unique()
     corrected = db[col].copy()
@@ -43,77 +46,6 @@ def fix_typos(col, db):
 
     return db
 
-
-# def fill_group_cat(group, target_col, train_grouped):
-#     """
-#     Fill NaNs in the target column for a group using the mode
-#     from the corresponding group in train_grouped.
-#     """
-#     try:
-#         # Get the corresponding group from train_grouped
-#         key = group.name
-#         train_group = train_grouped.get_group(key)
-#         mode_value = train_group[target_col].mode()
-#         if not mode_value.empty:
-#             group[target_col] = group[target_col].fillna(mode_value[0])
-#     except KeyError:
-#         # If no corresponding group in train, fill with overall mode
-#         mode_value = train_grouped.obj[target_col].mode()
-#         if not mode_value.empty:
-#             group[target_col] = group[target_col].fillna(mode_value[0])
-#     return group
-
-
-
-# def fill_NaN_with_categorical(df, train_db, target_col, helper_cols):
-#     """Fills NaNs using training-based modes to avoid leakage."""
-#     df = df.copy()
-    
-#     # 1. Create a specific lookup from TRAIN only
-#     # We use .agg(list).map(lambda x: mode) to handle multiple modes safely
-#     lookup = train_db.groupby(helper_cols)[target_col].apply(
-#         lambda x: x.mode()[0] if not x.mode().empty else None
-#     ).to_dict()
-
-#     # 2. Map the lookup. Since helper_cols is a list, we create a temporary key
-#     def get_val(row):
-#         key = tuple(row[col] for col in helper_cols)
-#         return lookup.get(key, None)
-
-#     df[target_col] = df[target_col].fillna(df.apply(get_val, axis=1))
-
-#     # 3. Fallback to global mode from TRAIN
-#     global_mode = train_db[target_col].mode()[0]
-#     df[target_col] = df[target_col].fillna(global_mode)
-#     return df
-
-# def fill_NaN_with_mixed(df, train_db, target_col, cat_col, num_col, n_bins=30):
-#     """Fills NaNs using shared bin edges to ensure consistency."""
-#     df = df.copy()
-    
-#     # FIX: Calculate bin edges ONLY on train_db
-#     _, bins = pd.qcut(train_db[num_col], q=n_bins, retbins=True, duplicates='drop')
-    
-#     # Apply those EXACT bins to both
-#     train_bins = pd.cut(train_db[num_col], bins=bins, labels=False, include_lowest=True)
-#     df_bins = pd.cut(df[num_col], bins=bins, labels=False, include_lowest=True)
-
-#     # Create lookup from binned train
-#     lookup = train_db.assign(tmp_bin=train_bins).groupby([cat_col, 'tmp_bin'])[target_col].apply(
-#         lambda x: x.mode()[0] if not x.mode().empty else None
-#     ).to_dict()
-
-#     # Map to df
-#     def get_val_mixed(row, bin_val):
-#         return lookup.get((row[cat_col], bin_val), None)
-
-#     # Use a helper series to map
-#     df_fill = pd.Series([lookup.get((c, b), None) for c, b in zip(df[cat_col], df_bins)], index=df.index)
-#     df[target_col] = df[target_col].fillna(df_fill)
-
-#     # Fallback to global mode from TRAIN
-#     df[target_col] = df[target_col].fillna(train_db[target_col].mode()[0])
-#     return df
 
 def fill_NaN_with_categorical(df, target_col, helper_cols, binned=None):
     """
@@ -158,7 +90,6 @@ def fill_NaN_with_categorical(df, target_col, helper_cols, binned=None):
     return df_filled
 
 
-
 def fill_NaN_with_mixed(df, target_col, cat_col, num_col, n_bins=15):
     """
     Fill NaN values in target_col using a combination of one categorical column
@@ -192,70 +123,24 @@ def fill_NaN_with_mixed(df, target_col, cat_col, num_col, n_bins=15):
     return df_filled
 
 
-# def fill_NaN_with_mixed(df, target_col, cat_cols, num_cols, n_bins=30):
-#     """
-#     Fill NaN values in target_col using a combination of categorical and numerical columns.
-#     Ignores helper columns with missing values for each row.
-
-#     Parameters:
-#         df (pd.DataFrame): Input DataFrame.
-#         target_col (str): Column with NaNs to fill.
-#         cat_cols (list of str): Categorical helper columns.
-#         num_cols (list of str): Numerical helper columns (to be binned).
-#         n_bins (int): Number of bins for numerical columns.
-
-#     Returns:
-#         pd.DataFrame: DataFrame with NaNs filled in target_col.
-#     """
-#     df = df.copy()
-
-#     # Bin numerical columns
-#     binned_num = pd.DataFrame(index=df.index)
-#     for col in num_cols:
-#         binned_num[col] = pd.cut(df[col], bins=n_bins, duplicates='drop').astype(str)
-
-#     # Convert categorical columns to string
-#     cat_df = df[cat_cols].astype(str) if cat_cols else pd.DataFrame(index=df.index)
-
-#     # Combine all helper columns
-#     helper_df = pd.concat([cat_df, binned_num], axis=1)
-
-#     # Function to build key for each row, ignoring missing helper values
-#     def build_key(row):
-#         valid_values = row.dropna().astype(str)
-#         return "_".join(valid_values) if not valid_values.empty else "ALL_NAN"
-
-#     # Create combined key row-wise
-#     df['_combined_key'] = helper_df.apply(build_key, axis=1)
-
-#     # Group by combined key and fill NaNs
-#     df_filled = df.groupby('_combined_key', group_keys=False).apply(lambda g: fill_group_cat(g, target_col))
-
-#     # Drop helper column
-#     df_filled = df_filled.drop(columns=['_combined_key'])
-#     return df_filled
-
 def fill_group_cat(group, target_col):
+    """
+    Helper function to fill NaNs in a specific group using its mode.
+    """
     mode_value = group[target_col].mode()
     if not mode_value.empty:
         group[target_col] = group[target_col].fillna(mode_value[0])
     return group
 
 
-# def fill_group_cat(group, target_col):
-#     mode_value = group[target_col].mode()
-#     if not mode_value.empty:
-#         group[target_col] = group[target_col].fillna(mode_value[0])
-#     return group
-
 def fill_NaN_with_numeric(df, target_col, helper_cols):
     """
-    Fill NaN values in a numerical column using 1 or 2 helper columns to compute group-wise statistic.
+    Fill NaN values in a numerical column using helper columns to compute group-wise median.
 
     Parameters:
         df (pd.DataFrame): Input DataFrame.
         target_col (str): Column with NaNs to fill.
-        helper_cols (list of str): List of 1 or 2 helper columns.
+        helper_cols (list of str): List of helper columns for grouping.
 
     Returns:
         pd.DataFrame: DataFrame with NaNs filled in target_col.
@@ -292,6 +177,7 @@ def missing_values_table(df):
     print(f"Columns with missing values: {missing_df.shape[0]}\n")
 
     return missing_df
+
 
 def negative_values_table(df):
     """
@@ -359,15 +245,12 @@ def irrational_values_table(df, decimal_threshold=3):
     return pd.concat([irrational_df, total_row])
 
 
-
-
-
 def negative_to_nan_columns(columns, df):
-    """Convert negative numeric values to NaN for specified columns."""
+    """
+    Convert negative numeric values to NaN for specified columns.
+    """
     df.loc[:, columns] = df[columns].where(df[columns] >= 0)
     return df
-
-
 
 
 def cramers_v(x, y):
@@ -397,6 +280,7 @@ def cramers_v(x, y):
         return 0.0  # Avoid division by zero
     
     return np.sqrt(chi2 / (n * min_dim))
+
 
 def correlation_ratio(categories, values):
     """
@@ -428,10 +312,10 @@ def correlation_ratio(categories, values):
     return np.sqrt(numerator / denominator)
 
 
-
-
 def conditional_entropy(x, y):
-    """Compute the conditional entropy H(X | Y)."""
+    """
+    Compute the conditional entropy H(X | Y).
+    """
     # x, y: array-like, same length
     y_counter = Counter(y)
     xy_counter = Counter(zip(x, y))
@@ -442,6 +326,7 @@ def conditional_entropy(x, y):
         p_y = y_counter[y_val] / total
         ent += p_xy * math.log(p_y / p_xy, 2)
     return ent
+
 
 def theils_u(x, y):
     """
@@ -475,7 +360,6 @@ def theils_u(x, y):
 
     # U(X|Y) = (H(X) – H(X|Y)) / H(X)
     return (s_x - s_x_given_y) / s_x
-
 
 
 def plot_histogram(data, xlabel, ylabel, title, color='green'):
@@ -547,7 +431,9 @@ def TestCorrelationRatio(categories, values, var, threshold=0.1):
 
 
 def plot_multiple_boxes_with_outliers(data, columns, ncols=2):
-
+    """
+    Plots multiple boxplots in a grid to identify outliers and distributions.
+    """
     num_columns = len(columns)
     nrows = (num_columns + ncols - 1) // ncols
     plt.figure(figsize=(8 * ncols, 4 * nrows))
@@ -576,8 +462,10 @@ def plot_multiple_boxes_with_outliers(data, columns, ncols=2):
     plt.show()
 
 
-
 def IQR_outliers(df, variables):
+    """
+    Identifies outliers using the IQR method and prints the count per variable.
+    """
     q1 = df[variables].quantile(0.25)
     q3 = df[variables].quantile(0.75)
     iqr = q3 - q1
@@ -588,7 +476,7 @@ def IQR_outliers(df, variables):
         outliers = df[(df[col] < lower[col]) | (df[col] > upper[col])]
         print(f"{col}: {len(outliers)} outliers")
 
-    return None  # não devolve o DataFrame inteiro
+    return None 
 
 
 def kfold_target_encode(train_df, cat_cols, target_col, id_col='carID', n_splits=5):
@@ -651,8 +539,10 @@ def kfold_target_encode(train_df, cat_cols, target_col, id_col='carID', n_splits
     return df[[*train_df.columns, encoded_col]]
 
 
-
 def predict_group(df, model, scaler, mapping, g_mean, train_cols):
+    """
+    Process and predict for a specific group, handling encoding, scaling and alignment.
+    """
     if df.empty: return pd.DataFrame()
     
     df_enc = df.copy()
@@ -675,6 +565,9 @@ def predict_group(df, model, scaler, mapping, g_mean, train_cols):
 
 
 def train_and_evaluate_rf(train_df, val_df, group_name):
+    """
+    Trains and tunes a Random Forest model using RandomizedSearchCV on a specific data group.
+    """
     # --- A. DATA PREPARATION (Encoding & Scaling) ---
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = train_df["price_log"].mean()
@@ -776,7 +669,11 @@ def train_and_evaluate_rf(train_df, val_df, group_name):
     
     return best_rf_split, scaler, mapping, global_mean, train_cols
 
+
 def train_and_evaluate_et(train_df, val_df, group_name):
+    """
+    Trains and tunes an Extra Trees model using RandomizedSearchCV on a specific data group.
+    """
     # --- A. DATA PREPARATION (Encoding & Scaling) ---
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = train_df["price_log"].mean()
@@ -831,13 +728,13 @@ def train_and_evaluate_et(train_df, val_df, group_name):
     search = RandomizedSearchCV(
         estimator=et_model,
         param_distributions=param_dist,
-        n_iter=50,            
-        cv=ps,                
+        n_iter=50,             
+        cv=ps,                 
         scoring=scoring_metrics,
         verbose=1,
         n_jobs=-1,
         random_state=42,
-        refit="MAE"           
+        refit="MAE"            
     )
     
     print(f"\n>>> Training ExtraTrees - Group: {group_name}")
@@ -880,7 +777,11 @@ def train_and_evaluate_et(train_df, val_df, group_name):
     
     return best_et_split, scaler, mapping, global_mean, train_cols
 
+
 def train_and_evaluate_hgb(train_df, val_df, group_name):
+    """
+    Trains and tunes a HistGradientBoosting model using RandomizedSearchCV on a specific data group.
+    """
     # --- A. DATA PREPARATION (Encoding & Scaling) ---
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = train_df["price_log"].mean()
@@ -940,13 +841,13 @@ def train_and_evaluate_hgb(train_df, val_df, group_name):
     search = RandomizedSearchCV(
         estimator=hgb_model,
         param_distributions=param_dist,
-        n_iter=50,            
-        cv=ps,                
+        n_iter=50,             
+        cv=ps,                 
         scoring=scoring_metrics,
         verbose=1,
         n_jobs=-1,
         random_state=42,
-        refit="MAE"           
+        refit="MAE"            
     )
     
     print(f"\n>>> Training HistGB - Group: {group_name}")
@@ -988,7 +889,6 @@ def train_and_evaluate_hgb(train_df, val_df, group_name):
     print(f"Overfit Gap (MAE): {gap:.2f}%")
     
     return best_hgb_split, scaler, mapping, global_mean, train_cols
-
 
 
 def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
@@ -1053,6 +953,9 @@ def train_stacking(train_df, val_df, test_df, estimators, group_name="Group"):
 
 
 def prepare_data_for_ensemble(train_df, val_df):
+    """
+    Prepares combined train and validation data for ensemble training with Scaling and Encoding.
+    """
     mapping = train_df.groupby(["Brand", "model"])["price_log"].mean().to_dict()
     global_mean = train_df["price_log"].mean()
     
@@ -1086,6 +989,9 @@ def prepare_data_for_ensemble(train_df, val_df):
 
 
 def predict_ensemble(df, model, scaler, mapping, g_mean, train_cols):
+    """
+    Predict using an ensemble model, handling preprocessing steps internally.
+    """
     if df.empty: return pd.DataFrame()
     df_enc = df.copy()
     df_enc["Brand_model_encoded"] = df_enc.apply(lambda x: mapping.get((x["Brand"], x["model"]), g_mean), axis=1)
@@ -1097,6 +1003,9 @@ def predict_ensemble(df, model, scaler, mapping, g_mean, train_cols):
 
 
 def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
+    """
+    Uses RandomizedSearchCV to find the optimal weights for a VotingRegressor ensemble.
+    """
     # --- 1. SETUP ENSEMBLE ---
     estimators_list = list(models_dict.items())
     model_names = [name for name, _ in estimators_list]
@@ -1191,7 +1100,12 @@ def optimize_ensemble_weights(models_dict, X, y, ps, group_name):
     
     return best_ensemble
 
+
 def clean_data(df):
+    """
+    Main cleaning pipeline: drops unnecessary columns, fixes text typos, 
+    clips outliers, transforms skewed distributions and imputes missing values.
+    """
     df = df.copy()
     
     df = df.drop(columns=["hasDamage", "paintQuality%"], errors='ignore')
